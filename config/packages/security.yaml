@@ -88,19 +88,32 @@ security:
         - { path: ^/api/, roles: IS_AUTHENTICATED_FULLY }
 
 when@test:
-    # Rate limits are generous in tests: the suite makes many authenticated
-    # calls from one IP. The 429 behavior itself is covered by
-    # AuthRateLimitSubscriberTest (deterministic, mock limiter).
+    # Rate limits are relaxed in tests via env defaults (1000) pinned in
+    # phpunit.dist.xml and mirrored in .env.test, so the functional suite is
+    # not noise. AuthRateLimitFunctionalTest overrides the SAME placeholders
+    # to the strict production values to prove the real 429 path through the
+    # actual firewalls.
+    #
+    # Storage is an in-memory array pool on purpose: the default cache.pool is
+    # filesystem-backed, which would share the IP-keyed register bucket across
+    # every test in the suite (and across runs). An array-backed pool dies with
+    # each test's container, so every test starts from empty buckets.
     framework:
+        cache:
+            pools:
+                test_rate_limiter_storage:
+                    adapter: cache.adapter.array
         rate_limiter:
             auth_login:
                 policy: sliding_window
-                limit: 1000
+                limit: '%env(int:RATE_LIMIT_LOGIN)%'
                 interval: 5 minutes
+                cache_pool: test_rate_limiter_storage
             auth_register:
                 policy: sliding_window
-                limit: 1000
+                limit: '%env(int:RATE_LIMIT_REGISTER)%'
                 interval: 10 minutes
+                cache_pool: test_rate_limiter_storage
 
     security:
         password_hashers:

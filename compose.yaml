@@ -1,6 +1,6 @@
-# 3awedlou — development PostgreSQL. THE single database setup for this repo:
+# 3awedlou ??? development PostgreSQL. THE single database setup for this repo:
 # `symfony serve` reads the service below and injects a DATABASE_URL built from
-# its environment — which now matches .env exactly, so there is no longer a
+# its environment ??? which now matches .env exactly, so there is no longer a
 # "random compose database" trap (the injected URL == the configured one).
 #
 #   docker compose up -d                  # start PostgreSQL (db_3awedlou + db_3awedlou_test)
@@ -10,7 +10,7 @@
 # Connection (must match DATABASE_URL in backend/.env / .env.local):
 #   postgresql://postgres:<password>@127.0.0.1:5432/db_3awedlou
 #
-# DEVELOPMENT ONLY — do not reuse these credentials in production.
+# DEVELOPMENT ONLY ??? do not reuse these credentials in production.
 name: 3awedlou
 
 services:
@@ -19,7 +19,7 @@ services:
     container_name: 3awedlou-postgres
     environment:
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_PASSWORD: postgres
       POSTGRES_DB: db_3awedlou
     ports:
       - "5432:5432"

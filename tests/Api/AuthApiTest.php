@@ -34,6 +34,7 @@ final class AuthApiTest extends WebTestCase
         $body = $this->json();
         self::assertTrue($body['success']);
         self::assertNotEmpty($body['data']['token']);
+        self::assertArrayHasKey('refresh_token', $body['data'], 'login must issue a refresh token alongside the access token');
         self::assertSame('Bearer', $body['data']['tokenType']);
         self::assertSame($email, $body['data']['user']['email']);
         self::assertArrayNotHasKey('password', $body['data']['user']);

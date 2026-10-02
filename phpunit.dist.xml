@@ -15,6 +15,11 @@
         <ini name="error_reporting" value="-1" />
         <server name="APP_ENV" value="test" force="true" />
         <server name="SHELL_VERBOSITY" value="-1" />
+        <!-- Relaxed rate-limit defaults for the suite (see
+             config/packages/security.yaml when@test). AuthRateLimitFunctionalTest
+             overrides these to the strict production values per test. -->
+        <env name="RATE_LIMIT_LOGIN" value="1000" force="true" />
+        <env name="RATE_LIMIT_REGISTER" value="1000" force="true" />
     </php>
 
     <extensions>

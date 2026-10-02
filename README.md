@@ -178,18 +178,43 @@ Notes:
 
 * Registration (`POST /api/auth/register`) is public and returns a token
   immediately.
-* There is **no server-side logout** to implement: with stateless JWT the
-  client simply discards the token. Token invalidation/refresh arrives in a
-  later phase (refresh tokens).
+* Login issues an access JWT **and** a refresh token (stored hashed at rest).
+  `POST /api/auth/token/refresh` rotates it (single-use — a replayed token is
+  rejected) and `POST /api/auth/logout` revokes it.
+* The public auth surface is **rate limited**: login 5 attempts / 5 min,
+  register 3 accounts / 10 min (per client IP, plus the normalized email for
+  login). Exceeding the limit returns `429` with a `Retry-After` header in the
+  standard error envelope.
 * `roles` live on the user; `ROLE_ADMIN` implies `ROLE_USER`
   (`role_hierarchy`).
+
+### Behind a reverse proxy (production) — trusted proxies
+
+The auth rate limiter keys its buckets by the **client IP**. Behind nginx, a
+load balancer or a CDN, Symfony sees the proxy's address unless you configure
+trusted proxies — every client would then share one bucket and lock each other
+out (or one attacker could evade the limit by spoofing `X-Forwarded-For`).
+
+In production, set it via environment variables (never hardcode IPs):
+
+```yaml
+# config/packages/framework.yaml
+framework:
+    trusted_proxies: '%env(string:TRUSTED_PROXIES)%'   # e.g. "10.0.0.0/8,173.245.48.0/20"
+    trusted_headers: ['x-forwarded-for', 'x-forwarded-host']
+```
+
+If the API is only ever reached directly (no proxy), leave it unset — the
+remote address is then already the client's.
 
 ## Available endpoints
 
 | Method | Path                                  | Auth | Description                                  |
 |--------|---------------------------------------|------|----------------------------------------------|
 | POST   | `/api/auth/register`                  | —    | Create account, returns JWT                  |
-| POST   | `/api/auth/login`                     | —    | Login, returns JWT                           |
+| POST   | `/api/auth/login`                     | —    | Login, returns access JWT **+ refresh token** |
+| POST   | `/api/auth/token/refresh`             | —    | Rotate refresh token → new access + refresh  |
+| POST   | `/api/auth/logout`                    | JWT  | Revoke a refresh token (it becomes unusable)  |
 | GET    | `/api/me`                             | JWT  | Current user                                 |
 | GET    | `/api/machines`                       | JWT  | All machines                                 |
 | GET    | `/api/machines/{id}`                  | JWT  | Machine + latest telemetry + active session  |
