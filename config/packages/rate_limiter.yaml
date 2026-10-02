@@ -1,0 +1,18 @@
+# Brute-force / abuse protection for the public auth surface.
+#
+#   - login:    5 attempts / 5 min / IP   → too many = HTTP 429 (x6)
+#   - register: 3 accounts  / 10 min / IP → stops mass account creation
+#
+# Policy switches (env): AUTH_REGISTER_ENABLED=false closes open registration
+# entirely; REMOVE the limiters here if a real deployment sits behind an
+# API gateway that already rate-limits.
+framework:
+    rate_limiter:
+        auth_login:
+            policy: 'sliding_window'
+            limit: 5
+            interval: '5 minutes'
+        auth_register:
+            policy: 'sliding_window'
+            limit: 3
+            interval: '10 minutes'

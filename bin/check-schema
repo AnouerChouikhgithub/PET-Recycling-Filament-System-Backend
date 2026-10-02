@@ -1,0 +1,86 @@
+<?php
+
+declare(strict_types=1);
+
+/**
+ * Migration/mapping contract check — run any time migrations change.
+ *
+ *   php bin/check-schema          # against the TEST database (db_3awedlou_test)
+ *
+ * What it does:
+ *   1. drops the target schema completely (empty database),
+ *   2. runs ALL migrations from scratch,
+ *   3. runs doctrine:schema:validate — the mapping (entities) and the
+ *      migrated schema must agree EXACTLY (exit 0).
+ *
+ * It refuses to run against the dev database unless --dev is passed
+ * explicitly: dropping dev data by accident is the failure mode this script
+ * exists to prevent. Rebuild dev instead:
+ *
+ *   php bin/console doctrine:database:drop --force --env=prod   # NEVER on prod!
+ *   # or simply (dev only):
+ *   php bin/check-schema --dev && php bin/console doctrine:fixtures:load
+ *
+ * The mapping/migration alignment this guards:
+ *   - explicit constraint/index names in entity attributes (RefreshToken,
+ *     DeviceToken) matching the migration (no auto-generated UNIQ_… names);
+ *   - machine_command_audit.command VARCHAR(32) in BOTH entity and migration;
+ *   - refresh_token.id as a real PostgreSQL IDENTITY column (no hand-made
+ *     sequence + nextval() default);
+ *   - machine.device_tokens_enabled carries the same column comment in both;
+ *   - the telemetry (machine_id, recorded_at DESC) composite index: Doctrine
+ *     cannot express DESC in attributes, so the entity declares the same
+ *     index NAME with plain columns (DBAL compares name + columns) while the
+ *     DESC ordering lives only in migrations/Version20260930000001.php.
+ */
+
+use Symfony\Component\Console\Input\ArgvInput;
+use Symfony\Component\Dotenv\Dotenv;
+
+require dirname(__DIR__).'/vendor/autoload.php';
+
+$dev = \in_array('--dev', $_SERVER['argv'] ?? [], true);
+$env = $dev ? 'dev' : 'test';
+
+if ($dev) {
+    fwrite(STDERR, "WARNING: --dev given: the DEV database schema will be DROPPED and re-migrated.\n");
+}
+
+// Boot env like the console does so DATABASE_URL / dbname_suffix resolve the
+// same way for every command below.
+if (!isset($_SERVER['APP_ENV'])) {
+    (new Dotenv())->bootEnv(dirname(__DIR__).'/.env', 'dev');
+}
+
+$exit = 0;
+$steps = [
+    ['doctrine:schema:drop', ['--force', '--full-database']],
+    ['doctrine:migrations:migrate', ['--no-interaction', '--all-or-nothing']],
+    ['doctrine:schema:validate', []],
+];
+
+foreach ($steps as [$command, $args]) {
+    $cmdline = array_merge(
+        [\PHP_BINARY, dirname(__DIR__).'/bin/console', '--env='.$env],
+        [$command],
+        $args,
+    );
+
+    fwrite(STDOUT, "\n> ".implode(' ', array_slice($cmdline, 2))."\n");
+
+    $code = 1;
+    system(implode(' ', array_map(static fn (string $part): string => escapeshellarg($part), $cmdline)), $code);
+
+    if (0 !== $code) {
+        fwrite(STDERR, sprintf("\nFAILED: %s (exit %d) — schema/mapping contract is BROKEN.\n", $command, $code));
+        $exit = $code;
+
+        break;
+    }
+}
+
+if (0 === $exit) {
+    fwrite(STDOUT, "\n[OK] migrations on an empty database satisfy the entity mapping (schema:validate exit 0).\n");
+}
+
+exit($exit);
