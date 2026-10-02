@@ -1,0 +1,31 @@
+parameters:
+    level: 6
+    paths:
+        - src
+        - tests
+        - bin
+    excludePaths:
+        analyse:
+            - var
+            - vendor
+    # Run from the project root (vendor/bin/phpstan, or `composer phpstan`).
+    symfony:
+        containerXmlPath: '%currentWorkingDirectory%/var/cache/dev/App_KernelDevDebugContainer.xml'
+        constantHassers: true
+    # Targeted ignores — each documented at the site (see the referenced files).
+    ignoreErrors:
+        #
+        # src/Repository/RefreshTokenRepository.php — unresolvable generics:
+        # gesdinet's RefreshTokenRepositoryInterface is @template T of
+        # RefreshTokenInterface while Doctrine's ServiceEntityRepository fixes
+        # ObjectRepository<T> to the entity class. No valid @template satisfies
+        # both; the runtime contract is covered by RefreshTokenFlowTest.
+        -
+            message: '~implements generic interface Gesdinet\\JWTRefreshTokenBundle\\Doctrine\\RefreshTokenRepositoryInterface but does not specify its types~'
+            path: 'src/Repository/RefreshTokenRepository.php'
+        -
+            message: '~already specified as Gesdinet\\JWTRefreshTokenBundle\\Model\\RefreshTokenInterface~'
+            path: 'src/Repository/RefreshTokenRepository.php'
+
+includes:
+    - vendor/phpstan/phpstan-symfony/extension.neon

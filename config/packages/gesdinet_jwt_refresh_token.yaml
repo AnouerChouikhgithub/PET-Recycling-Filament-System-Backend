@@ -1,0 +1,24 @@
+# Refresh tokens (rotation + revocation) for the JWT auth flow.
+#
+#   - ttl: 30 days; a refresh token dies if unused for that long.
+#   - single_use: ROTATION — every refresh issues a new refresh token and
+#     deletes the one it was given (replay of a rotated token fails).
+#   - hash_tokens: only the HASH of the refresh token is stored, so a leaked
+#     database backup cannot be used to refresh sessions.
+#   - max_tokens_per_user: bounds concurrent signed-in devices.
+#
+# The refresh endpoint answers on POST /api/auth/token/refresh (security.yaml,
+# firewall "refresh"). POST /api/auth/logout (App\Controller\Api\AuthController)
+# revokes the presented token.
+gesdinet_jwt_refresh_token:
+    ttl: 2592000                # 30 days
+    ttl_update: false
+    single_use: true            # rotation
+    single_use_ttl_update: true
+    token_parameter_name: refresh_token
+    refresh_token_class: App\Entity\RefreshToken
+    manager_type: orm
+    hash_tokens:
+        enabled: true
+    max_tokens_per_user: 10
+    return_expiration: true

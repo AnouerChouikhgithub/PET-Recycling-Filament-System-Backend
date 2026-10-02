@@ -9,3 +9,9 @@
 
 controllers:
     resource: routing.controllers
+
+# POST /api/auth/login — handled entirely by the security json_login firewall
+# (see config/packages/security.yaml → firewalls.login).
+api_login_check:
+    path: /api/auth/login
+    methods: POST

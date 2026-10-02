@@ -3,8 +3,33 @@
 /.env.local
 /.env.local.php
 /.env.*.local
+/.env.dev
+/.env.test
 /config/secrets/prod/prod.decrypt.private.php
 /public/bundles/
 /var/
 /vendor/
 ###< symfony/framework-bundle ###
+
+###> phpunit/phpunit ###
+/phpunit.xml
+/.phpunit.cache/
+###< phpunit/phpunit ###
+
+###> symfony/asset-mapper ###
+/public/assets/
+/assets/vendor/
+###< symfony/asset-mapper ###
+
+###> lexik/jwt-authentication-bundle ###
+/config/jwt/*.pem
+*.pem
+###< lexik/jwt-authentication-bundle ###
+
+###> tooling ###
+/.php-cs-fixer.cache/
+.phpunit.result.cache
+*.log
+###< tooling ###
+.env.dev
+.env.test

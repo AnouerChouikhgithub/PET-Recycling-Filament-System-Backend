@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# Dev sanity check — prints which database the app actually uses, verifies it,
+# and warns about the classic foot-guns (stale containers on other ports).
+#
+#   bash bin/dev-check        (Git Bash / Linux / macOS)
+#   powershell -File bin/dev-check.ps1   (Windows PowerShell)
+set -u
+
+say() { printf '%s\n' "$*"; }
+
+say "== Docker postgres containers =="
+if command -v docker >/dev/null 2>&1; then
+  if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -i postgres >/dev/null; then
+    say "WARNING: no running postgres container. Start it: docker compose up -d"
+  fi
+  docker ps --format '{{.Names}} | {{.Image}} | {{.Ports}}' | grep -iE 'postgres|mailpit' || true
+  COUNT=$(docker ps --format '{{.Image}}' 2>/dev/null | grep -c postgres || true)
+  if [ "$COUNT" -gt 1 ]; then
+    say "WARNING: $COUNT postgres containers are running — 'symfony serve' may inject a different DATABASE_URL than .env!"
+  fi
+else
+  say "WARNING: docker CLI not found."
+fi
+say ""
+
+say "== DATABASE_URL the app resolves (password redacted) =="
+php -r '
+require "vendor/autoload.php";
+if (!isset($_SERVER["APP_ENV"])) { (new Symfony\Component\Dotenv\Dotenv())->bootEnv(".env", "dev"); }
+$url = (string) ($_SERVER["DATABASE_URL"] ?? $_ENV["DATABASE_URL"] ?? getenv("DATABASE_URL"));
+$p = parse_url($url);
+printf("host=%s port=%s dbname=%s user=%s\n", $p["host"] ?? "?", $p["port"] ?? "5432", ltrim($p["path"] ?? "?", "/"), $p["user"] ?? "?");
+' || { say "ERROR: could not resolve DATABASE_URL."; exit 1; }
+say ""
+
+say "== SELECT current_database() via the app connection =="
+php -r '
+require "vendor/autoload.php";
+if (!isset($_SERVER["APP_ENV"])) { (new Symfony\Component\Dotenv\Dotenv())->bootEnv(".env", "dev"); }
+$url = (string) ($_SERVER["DATABASE_URL"] ?? $_ENV["DATABASE_URL"] ?? getenv("DATABASE_URL"));
+$p = parse_url($url);
+$dsn = sprintf("pgsql:host=%s;port=%d;dbname=%s", $p["host"] ?? "127.0.0.1", $p["port"] ?? 5432, ltrim($p["path"] ?? "/", "/"));
+try {
+  $pdo = new PDO($dsn, $p["user"] ?? "postgres", $p["pass"] ?? "");
+  printf("current_database = %s\n", $pdo->query("SELECT current_database()")->fetchColumn());
+} catch (Throwable $e) {
+  echo "ERROR: cannot connect (is docker compose up -d?)\n";
+  exit(1);
+}
+' || true
+say ""
+
+say "== Migration status =="
+php bin/console doctrine:migrations:up-to-date || true
+say ""
+
+say "== doctrine:schema:validate =="
+php bin/console doctrine:schema:validate --skip-sync -q >/dev/null 2>&1; M=$?
+php bin/console doctrine:schema:validate --skip-mapping >/dev/null 2>&1; S=$?
+if [ "$M" -eq 0 ] && [ "$S" -eq 0 ]; then say "[OK] mapping + database schema are in sync"; else say "[FAIL] schema drift detected — run: php bin/check-schema --dev && php bin/console doctrine:fixtures:load"; fi
+say ""
+
+say "== JWT keys present? =="
+[ -f config/jwt/private.pem ] && say "[OK] config/jwt/private.pem exists (values never printed)" || say "MISSING: run php bin/console lexik:jwt:generate-keypair"

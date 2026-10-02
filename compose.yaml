@@ -1,0 +1,50 @@
+# 3awedlou ??? development PostgreSQL. THE single database setup for this repo:
+# `symfony serve` reads the service below and injects a DATABASE_URL built from
+# its environment ??? which now matches .env exactly, so there is no longer a
+# "random compose database" trap (the injected URL == the configured one).
+#
+#   docker compose up -d                  # start PostgreSQL (db_3awedlou + db_3awedlou_test)
+#   docker compose --profile mail up -d   # + Mailpit UI (http://localhost:8025)
+#   docker compose down                   # stop (data survives in the named volume)
+#
+# Connection (must match DATABASE_URL in backend/.env / .env.local):
+#   postgresql://postgres:<password>@127.0.0.1:5432/db_3awedlou
+#
+# DEVELOPMENT ONLY ??? do not reuse these credentials in production.
+name: 3awedlou
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: 3awedlou-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: db_3awedlou
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      # Creates db_3awedlou_test on the FIRST start of an empty volume.
+      - ./docker/initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d db_3awedlou"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # Optional dev mail catcher, behind a profile: `docker compose --profile mail up -d`.
+  mailer:
+    image: axllent/mailpit
+    profiles: ["mail"]
+    ports:
+      - "1025:1025"
+      - "8025:8025"
+    environment:
+      MP_SMTP_AUTH_ACCEPT_ANY: 1
+      MP_SMTP_AUTH_ALLOW_INSECURE: 1
+
+volumes:
+  postgres_data:
+    # Existing local volume keeps its data; the container name matches the one
+    # already used on this machine (3awedlou-postgres).

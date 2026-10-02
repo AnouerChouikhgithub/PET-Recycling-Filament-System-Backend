@@ -1,0 +1,126 @@
+security:
+    # https://symfony.com/doc/current/security.html#registering-the-user-hashing-passwords
+    password_hashers:
+        Symfony\Component\Security\Core\User\PasswordAuthenticatedUserInterface: 'auto'
+        App\Entity\User: 'auto'
+
+    role_hierarchy:
+        ROLE_ADMIN: ROLE_USER
+
+    # https://symfony.com/doc/current/security.html#loading-the-user-the-user-provider
+    providers:
+        # Users are loaded from PostgreSQL via App\Repository\UserRepository,
+        # with email normalization (login is case-insensitive).
+        app_user_provider:
+            id: App\Security\UserProvider
+        # Devices (machines) authenticate on the IoT firewall; the machine
+        # object is resolved by the authenticator itself.
+        users_for_device:
+            id: App\Security\DeviceUserProvider
+
+    firewalls:
+        dev:
+            # Ensure dev tools and static assets are always allowed
+            pattern: ^/(_profiler|_wdt|assets|build)/
+            security: false
+
+        # POST /api/machines/{id}/telemetry — DEVICE credentials only.
+        # A X-Device-Token header is authenticated against the per-machine
+        # hashed token (App\Security\DeviceTokenAuthenticator); a user JWT is
+        # NOT accepted here: the firewall has no user authenticator, so a
+        # bearer JWT cannot satisfy it and ingest fails with 401.
+        device:
+            pattern: ^/api/machines/[^/]+/telemetry$
+            methods: [POST]
+            stateless: true
+            provider: users_for_device
+            device-token: ~
+            entry_point: App\Security\DeviceTokenAuthenticator
+
+        # POST /api/auth/login — credentials in, access + refresh JWT out.
+        login:
+            pattern: ^/api/auth/login$
+            stateless: true
+            provider: app_user_provider
+            json_login:
+                check_path: api_login_check
+                username_path: email
+                success_handler: App\Security\JwtLoginSuccessHandler
+                failure_handler: App\Security\JwtLoginFailureHandler
+
+        # POST /api/auth/token/refresh — refresh token in, NEW access + refresh
+        # tokens out (rotation via single_use). Not reachable with a plain JWT.
+        # success_handler = the login envelope shape (token/tokenType/user),
+        # with the rotated refresh_token appended by the bundle's listener.
+        refresh:
+            pattern: ^/api/auth/token/refresh$
+            stateless: true
+            provider: app_user_provider
+            refresh_jwt:
+                check_path: /api/auth/token/refresh
+                success_handler: App\Security\JwtLoginSuccessHandler
+
+        # Every other /api route — stateless user JWT authentication.
+        api:
+            pattern: ^/api/
+            stateless: true
+            provider: app_user_provider
+            jwt: ~
+            # Return 401 instead of 403 when no token is presented — the
+            # correct REST semantic. (Invalid/expired tokens get 401 envelopes
+            # from App\Api\EventSubscriber\JwtFailureFormatSubscriber.)
+            entry_point: App\Security\ApiAuthenticationEntryPoint
+
+        main:
+            lazy: true
+            provider: app_user_provider
+
+    # Note: Only the *first* matching rule is applied
+    access_control:
+        # Public auth surface (rate limits live on the routes, not here).
+        - { path: ^/api/auth/login$, roles: PUBLIC_ACCESS }
+        - { path: ^/api/auth/register$, roles: PUBLIC_ACCESS }
+        - { path: ^/api/auth/token/refresh$, roles: PUBLIC_ACCESS }
+        - { path: ^/api/auth/logout$, roles: IS_AUTHENTICATED_FULLY }
+        # Telemetry ingest is DEVICE-only: the device firewall has no user
+        # authenticator, so a user JWT can never reach this route.
+        - { path: ^/api/machines/[^/]+/telemetry$, methods: [POST], roles: IS_AUTHENTICATED_FULLY }
+        - { path: ^/api/, roles: IS_AUTHENTICATED_FULLY }
+
+when@test:
+    # Rate limits are relaxed in tests via env defaults (1000) pinned in
+    # phpunit.dist.xml and mirrored in .env.test, so the functional suite is
+    # not noise. AuthRateLimitFunctionalTest overrides the SAME placeholders
+    # to the strict production values to prove the real 429 path through the
+    # actual firewalls.
+    #
+    # Storage is an in-memory array pool on purpose: the default cache.pool is
+    # filesystem-backed, which would share the IP-keyed register bucket across
+    # every test in the suite (and across runs). An array-backed pool dies with
+    # each test's container, so every test starts from empty buckets.
+    framework:
+        cache:
+            pools:
+                test_rate_limiter_storage:
+                    adapter: cache.adapter.array
+        rate_limiter:
+            auth_login:
+                policy: sliding_window
+                limit: '%env(int:RATE_LIMIT_LOGIN)%'
+                interval: 5 minutes
+                cache_pool: test_rate_limiter_storage
+            auth_register:
+                policy: sliding_window
+                limit: '%env(int:RATE_LIMIT_REGISTER)%'
+                interval: 10 minutes
+                cache_pool: test_rate_limiter_storage
+
+    security:
+        password_hashers:
+            # Password hashers are resource-intensive by design to ensure security.
+            # In tests, it's safe to reduce their cost to improve performance.
+            Symfony\Component\Security\Core\User\PasswordAuthenticatedUserInterface:
+                algorithm: auto
+                cost: 4 # Lowest possible value for bcrypt
+                time_cost: 3 # Lowest possible value for argon
+                memory_cost: 10 # Lowest possible value for argon

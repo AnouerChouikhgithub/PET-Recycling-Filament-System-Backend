@@ -1,0 +1,17 @@
+# PRODUCTION note: always set CORS_ALLOW_ORIGIN in the environment (see
+# .env.example). The empty-string default below matches no origin — the app
+# must be configured explicitly before browsers may call it.
+nelmio_cors:
+    defaults:
+        origin_regex: true
+        # Allowed origins come from the CORS_ALLOW_ORIGIN env var so that
+        # development (Vite dev server, Expo) and production can be configured
+        # separately — see .env / .env.local and the README.
+        allow_origin: ['%env(default::CORS_ALLOW_ORIGIN)%']
+        allow_methods: ['GET', 'OPTIONS', 'POST', 'PUT', 'PATCH', 'DELETE']
+        allow_headers: ['Content-Type', 'Authorization']
+        expose_headers: ['Link']
+        max_age: 3600
+    paths:
+        # CORS is applied to the API surface only.
+        '^/api/': null
