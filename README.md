@@ -83,7 +83,15 @@ Configuration lives in `.env` (committed defaults) and `.env.local`
 | `JWT_PUBLIC_KEY`     | path to RSA public key                         | `config/jwt/public.pem`                |
 | `JWT_PASSPHRASE`     | passphrase of the private key                  | generated dev value                    |
 | `CORS_ALLOW_ORIGIN`  | regex of allowed browser origins               | `^https?://(localhost\|127\.0\.0\.1)(:[0-9]+)?$` |
-| `MQTT_*`             | **documented only** — phase 2 (not required)   | commented out in `.env`                |
+| `MQTT_*`             | broker transport — see table below             | `MQTT_ENABLED=false` (off)             |
+
+MQTT variables (all defaults safe for offline dev/tests — see
+`.env.example` for the annotated list): `MQTT_ENABLED` `MQTT_HOST`
+`MQTT_PORT` `MQTT_USERNAME` `MQTT_PASSWORD` `MQTT_CLIENT_ID` `MQTT_TLS`
+`MQTT_PREFIX` `MQTT_QOS` `MQTT_COMMAND_TTL_SECONDS` `MQTT_MAX_PAYLOAD_BYTES`
+`MQTT_TELEMETRY_MAX_PER_SECOND`. Credentials (`MQTT_USERNAME` /
+`MQTT_PASSWORD`) live in `.env.local` only — **never committed**. Full
+contract: [`docs/mqtt-contract.md`](docs/mqtt-contract.md).
 
 ```bash
 # local overrides (never commit this file)
@@ -278,7 +286,7 @@ remote address is then already the client's.
 | GET    | `/api/machines/{id}/sessions`         | JWT  | Session history (`?limit=&offset=&status=`)  |
 | GET    | `/api/machines/{id}/production`       | JWT  | Filament production records                  |
 | GET    | `/api/machines/{id}/recycling`        | JWT  | Recycling records + impact totals            |
-| POST   | `/api/machines/{id}/commands`         | JWT  | Guarded remote command → 202 (MQTT-ready)    |
+| POST   | `/api/machines/{id}/commands`         | JWT  | Guarded remote command → 202 (503 if the broker is down) |
 
 Full request/response shapes: [`docs/api-contract.md`](docs/api-contract.md).
 
@@ -294,7 +302,7 @@ curl -X POST http://127.0.0.1:8000/api/machines/{id}/telemetry \
 
 The sample is validated (unknown fields rejected, sane ranges enforced), stored,
 bumps `lastSeenAt` and may update the machine's reported status. The same
-`TelemetryProcessor` serves the future MQTT consumer — one pipeline, no duplicates.
+`TelemetryProcessor` also serves the MQTT consumer — one pipeline, no duplicates.
 
 ### Sending a machine command
 
@@ -304,9 +312,14 @@ curl -X POST http://127.0.0.1:8000/api/machines/{id}/commands \
   -d '{"command":"setTargetTemperature","value":195}'
 ```
 
-Replies **202** with the resolved MQTT topic. The guard rejects (422) commands
-from offline machines, invalid state transitions (`resume` when not paused) and
-out-of-range values (heater ≤ 300 °C, motor/fan 0–100 %).
+Replies **202** with the resolved MQTT topic, a `commandId` (correlated to the
+audit row) and `delivery`: `published_to_broker` when `MQTT_ENABLED=true` and
+the broker accepted the publish, `buffered_not_sent` otherwise. If the broker
+is enabled but unreachable the reply is **503 `MQTT_UNAVAILABLE`** — never a
+fake success. The guard rejects (422) commands from offline machines, invalid
+state transitions (`resume` when not paused) and out-of-range values
+(heater ≤ 300 °C, motor/fan 0–100 %). **Acceptance ≠ execution**: the machine
+reports what actually ran through telemetry/status.
 
 ## Response format
 
@@ -390,17 +403,19 @@ php bin/console doctrine:migrations:migrate --env=test --no-interaction
 php bin/phpunit
 ```
 
-## Future phases (deliberately NOT implemented yet)
+## Status: implemented / prepared / future
 
-* **MQTT transport:** a real broker client behind `MqttPublisherInterface`
-  (swap one alias in `config/services.yaml`) + an MQTT consumer command that
-  feeds `TelemetryProcessor`. Env vars (`MQTT_HOST`…`MQTT_PREFIX`) are already
-  declared. ESP32 auth (per-device tokens) ships with it.
-* **Realtime transport:** a WebSocket/SSE/Mercure hub behind
-  `RealtimeBroadcaster` (same one-alias swap). Both frontends already program
-  against the final client interface and poll honestly in the meantime.
-* **Later:** refresh tokens / token revocation, session start/write endpoints
-  (currently the machine/firmware owns session lifecycle), push notifications,
-  admin back-office, deployment (Docker image, CI/CD).
+| Area | State |
+|---|---|
+| HTTP API (auth, machines, telemetry, sessions, commands) | **Implemented** |
+| MQTT broker publisher (`MQTT_ENABLED=true`) + audit trail | **Implemented** |
+| MQTT consumer (`app:mqtt:consume` → `TelemetryProcessor`) | **Implemented** |
+| Local Mosquitto dev broker with per-device ACL | **Implemented** (dev only, no TLS) |
+| Device acknowledgement of commands | **Prepared** — `commandId`/`expiresAt` are on the wire; `deviceAcknowledged` stays `false` until firmware acks |
+| Device events | **Prepared** — validated and logged, no side effects yet |
+| Realtime transport (WebSocket/SSE/Mercure behind `RealtimeBroadcaster`) | **Prepared** — both frontends program against the final interface and poll honestly |
+| ESP32 firmware (incl. device-side auth) | **Future** — not in this repo; the wire contract is [`docs/mqtt-contract.md`](docs/mqtt-contract.md) |
+| TLS + per-device broker credentials for deployment | **Future** — the dev broker is plaintext loopback only; never expose it |
+| Later | refresh-token revocation hardening, session start/write endpoints (machine/firmware owns session lifecycle today), push notifications, admin back-office, deployment (Docker image, CI/CD) |
 
 See `Tasks.xlsx` at the 3awedlou project root for the overall plan.
