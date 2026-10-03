@@ -20,6 +20,16 @@ parameters:
     app.command.motor_max: '%env(float:COMMAND_MOTOR_MAX)%'
     app.command.fan_max: '%env(float:COMMAND_FAN_MAX)%'
 
+    # MQTT non-secret defaults. .env.example documents every MQTT_* variable;
+    # these parameters are the fallback used by %env(default:<param>:…)% so the
+    # container still boots when .env/.env.local omits one, and so the "off"
+    # default (MQTT_ENABLED=false) cannot be forgotten. Never put a secret here.
+    app.mqtt.enabled_default: false
+    app.mqtt.qos_default: 1
+    app.mqtt.command_ttl_seconds_default: 30
+    app.mqtt.max_payload_bytes_default: 4096
+    app.mqtt.telemetry_max_per_second_default: 2
+
 services:
     # default configuration for services in *this* file
     _defaults:
@@ -70,13 +80,36 @@ services:
 
     App\Security\DeviceTokenAuthenticator: ~
 
+    App\Service\IoT\MqttConfig:
+        # Typed MQTT_* parameters (App\Service\IoT\MqttConfig). The five
+        # `default:` fallbacks keep the container bootable when .env does not
+        # define the variable; MQTT_ENABLED defaults to false, i.e. no socket.
+        arguments:
+            $enabled: '%env(default:app.mqtt.enabled_default:bool:MQTT_ENABLED)%'
+            $host: '%env(string:MQTT_HOST)%'
+            $port: '%env(int:MQTT_PORT)%'
+            $username: '%env(string:MQTT_USERNAME)%'
+            $password: '%env(string:MQTT_PASSWORD)%'
+            $clientId: '%env(string:MQTT_CLIENT_ID)%'
+            $tls: '%env(bool:MQTT_TLS)%'
+            $prefix: '%env(string:MQTT_PREFIX)%'
+            $qos: '%env(default:app.mqtt.qos_default:int:MQTT_QOS)%'
+            $commandTtlSeconds: '%env(default:app.mqtt.command_ttl_seconds_default:int:MQTT_COMMAND_TTL_SECONDS)%'
+            $maxPayloadBytes: '%env(default:app.mqtt.max_payload_bytes_default:int:MQTT_MAX_PAYLOAD_BYTES)%'
+            $telemetryMaxPerSecond: '%env(default:app.mqtt.telemetry_max_per_second_default:int:MQTT_TELEMETRY_MAX_PER_SECOND)%'
+
     App\Service\IoT\MqttTopicBuilder:
         arguments:
             $prefix: '%env(string:MQTT_PREFIX)%'
 
-    # Until the real broker client lands, publishes are buffered + logged.
-    # Swap the alias to a real implementation (Messenger transport, php-mqtt…)
-    # without touching any consumer code.
+    # Inbound seam used by `app:mqtt:consume` — a real socket when a broker is
+    # configured, a test double in the suite. Business logic never sees it.
+    App\Service\IoT\MqttSubscriberInterface: '@App\Service\IoT\PhpMqttSubscriber'
+
+    # Outbound seam. Task 3 swaps this alias to SelectedMqttPublisher, which
+    # picks the real broker client when MQTT_ENABLED=true; until then (and
+    # whenever MQTT_ENABLED=false) publishes are buffered + logged, exactly as
+    # before. Consumer code depends on the interface either way.
     App\Service\IoT\MqttPublisherInterface: '@App\Service\IoT\BufferingMqttPublisher'
 
     # Realtime fan-out: 'logging' today, WebSocket/SSE/Mercure hub later —

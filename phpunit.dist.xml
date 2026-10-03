@@ -20,6 +20,17 @@
              overrides these to the strict production values per test. -->
         <env name="RATE_LIMIT_LOGIN" value="1000" force="true" />
         <env name="RATE_LIMIT_REGISTER" value="1000" force="true" />
+        <!-- MQTT: the default suite must never open a socket, so the transport
+             is forced off and every parameter gets a non-secret default. The
+             opt-in integration test reads MQTT_TEST_HOST instead. -->
+        <env name="MQTT_ENABLED" value="false" force="true" />
+        <env name="MQTT_HOST" value="127.0.0.1" force="true" />
+        <env name="MQTT_PORT" value="1883" force="true" />
+        <env name="MQTT_PREFIX" value="3awedlou" force="true" />
+        <env name="MQTT_QOS" value="1" force="true" />
+        <env name="MQTT_COMMAND_TTL_SECONDS" value="30" force="true" />
+        <env name="MQTT_MAX_PAYLOAD_BYTES" value="4096" force="true" />
+        <env name="MQTT_TELEMETRY_MAX_PER_SECOND" value="2" force="true" />
     </php>
 
     <extensions>
