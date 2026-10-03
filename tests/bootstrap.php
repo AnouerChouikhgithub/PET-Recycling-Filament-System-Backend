@@ -39,7 +39,11 @@ if ($_SERVER['APP_DEBUG']) {
         return $process;
     };
 
-    $probe = $run(['dbal:run-sql', '--sql', 'SELECT 1 FROM doctrine_migration_versions LIMIT 1']);
+    // NOTE: dbal:run-sql takes the SQL POSITIONALLY (`dbal:run-sql <sql>`);
+    // passing `--sql` makes the command fail on a perfectly healthy schema,
+    // which silently turned the "cheap probe" below into a full rebuild on
+    // every single run.
+    $probe = $run(['dbal:run-sql', 'SELECT 1 FROM doctrine_migration_versions LIMIT 1']);
     if ($probe->isSuccessful()) {
         return; // schema is ready — the common path
     }
