@@ -8,6 +8,7 @@ use App\Api\Exception\ValidationException;
 use App\Entity\Machine;
 use App\Entity\MachineStatus;
 use App\Entity\MachineTelemetry;
+use App\Service\Machine\MachineConnectivityService;
 use Doctrine\ORM\EntityManagerInterface;
 use Psr\Log\LoggerInterface;
 use Symfony\Contracts\EventDispatcher\EventDispatcherInterface;
@@ -25,9 +26,11 @@ use Symfony\Contracts\EventDispatcher\EventDispatcherInterface;
  *        → machine status + lastSeenAt refreshed (race-safe UPDATE)
  *        → TelemetryProcessedEvent (future realtime layer)
  *
- * Concurrency: liveness is refreshed with a targeted UPDATE (not a
- * read-modify-write of the whole entity), so concurrent ingests from
- * several devices can never resurrect stale status data.
+ * Concurrency: liveness is refreshed through
+ * MachineConnectivityService::markSeen() — a targeted UPDATE (not a
+ * read-modify-write of the whole entity), so concurrent ingests from several
+ * devices can never resurrect stale status data. Connectivity has exactly one
+ * implementation, shared with the MQTT consumer.
  */
 final class TelemetryProcessor
 {
@@ -55,6 +58,7 @@ final class TelemetryProcessor
         private readonly EntityManagerInterface $em,
         private readonly EventDispatcherInterface $dispatcher,
         private readonly LoggerInterface $logger,
+        private readonly MachineConnectivityService $connectivity,
     ) {
     }
 
@@ -97,27 +101,15 @@ final class TelemetryProcessor
             }
         }
 
-        $this->em->wrapInTransaction(function () use ($machine, $telemetry, $status, $markSeen): void {
+        $this->em->wrapInTransaction(function () use ($machine, $telemetry, $reported, $markSeen): void {
             $this->em->persist($telemetry);
             $this->em->flush();
 
             if ($markSeen) {
-                // Race-safe targeted UPDATE — never a read-modify-write of the
-                // whole row, and status moves forward only when fresher.
-                $conn = $this->em->getConnection();
-                if (null !== $status) {
-                    $conn->executeStatement(
-                        'UPDATE machine SET last_seen_at = CASE WHEN last_seen_at IS NULL OR last_seen_at < :now THEN :now ELSE last_seen_at END,'
-                        .' status = :status, updated_at = :now WHERE id = :id',
-                        ['now' => (new \DateTimeImmutable())->format('Y-m-d H:i:s'), 'status' => $status, 'id' => $machine->getId()->toRfc4122()],
-                    );
-                } else {
-                    $conn->executeStatement(
-                        'UPDATE machine SET last_seen_at = CASE WHEN last_seen_at IS NULL OR last_seen_at < :now THEN :now ELSE last_seen_at END,'
-                        .' updated_at = :now WHERE id = :id',
-                        ['now' => (new \DateTimeImmutable())->format('Y-m-d H:i:s'), 'id' => $machine->getId()->toRfc4122()],
-                    );
-                }
+                // Race-safe targeted UPDATE — shared with the MQTT consumer
+                // through MachineConnectivityService, the single source of
+                // truth for connectivity. lastSeenAt only moves forward.
+                $this->connectivity->markSeen($machine, $reported);
             }
         });
 

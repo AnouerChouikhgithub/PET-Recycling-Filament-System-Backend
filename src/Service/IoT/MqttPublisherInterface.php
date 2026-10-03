@@ -7,17 +7,28 @@ namespace App\Service\IoT;
 /**
  * Contract for publishing messages to the machine fleet over MQTT.
  *
- * Phase 2 will ship a real implementation (symfony/messenger + php-mqtt/client
- * or similar) behind this interface; until then a buffering no-op keeps the
- * command pipeline testable and the API contract stable. Consumers — the
- * command service, the telemetry processor's future status fan-out — depend on
- * this abstraction, never on a concrete broker client.
+ * Two implementations, selected by MQTT_ENABLED (see SelectedMqttPublisher):
+ *   - BufferingMqttPublisher — default: buffers + logs, opens no socket, so
+ *     tests and broker-less development are unchanged;
+ *   - BrokerMqttPublisher — real broker via MqttConnectionInterface; throws
+ *     MqttUnavailableException instead of pretending a publish succeeded.
+ *
+ * Consumers (the command service, the realtime fan-out) depend on this
+ * abstraction only, never on a concrete broker client — which is also what
+ * lets the whole suite run without a broker.
  */
 interface MqttPublisherInterface
 {
     /**
      * Publish $payload (already-serialized JSON) to a full topic, e.g.
-     * `3awedlou/machines/3awedlou-001/commands`.
+     * `{prefix}/machines/{identifier}/commands`.
+     *
+     * Implementations MUST publish with retain = false — a retained command
+     * would be replayed to the device on every reconnect.
+     *
+     * @throws \App\Api\Exception\MqttUnavailableException when the real broker
+     *                                  cannot be reached (implementations that
+     *                                  do not talk to a broker never throw)
      */
     public function publish(string $topic, string $payload, int $qos = 1): void;
 }

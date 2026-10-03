@@ -1,0 +1,51 @@
+# 3awedlou — Mosquitto broker for LOCAL DEVELOPMENT ONLY.
+#
+# Deliberately a SEPARATE compose file from compose.yaml: the app's postgres
+# stack must stay untouched (mixing the two re-opens the symfony-serve
+# DATABASE_URL auto-injection / two-database trap). This file starts exactly
+# one service — the broker — and nothing else.
+#
+#   docker compose -f compose.mqtt.yaml up -d      # start the broker
+#   docker compose -f compose.mqtt.yaml down       # stop it (data survives)
+#
+# SECURITY (read this before opening port 1883 to anything):
+#   * The port mapping below is bound to 127.0.0.1 ONLY. 1883 is plaintext
+#     MQTT (no TLS): it must NEVER be exposed to the internet or to an
+#     untrusted LAN. A device on the same network can otherwise sniff
+#     credentials and inject commands.
+#   * Any real deployment needs TLS on 8883 with per-device credentials —
+#     that is out of scope for this dev stack and is not implemented here.
+#
+# Passwords live in ./docker/mosquitto/passwd, which is GIT-IGNORED.
+# Create/update broker users with bin/mqtt-user.ps1 (Windows) or
+# bin/mqtt-user.sh (Linux/macOS) — never by editing files by hand.
+
+name: 3awedlou-mqtt
+
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2
+    container_name: 3awedlou-mosquitto
+    restart: unless-stopped
+    ports:
+      # Loopback only. Changing this to "1883:1883" would publish plaintext
+      # MQTT on every interface — do not do that, not even on your LAN.
+      - "127.0.0.1:1883:1883"
+    volumes:
+      # Config (mosquitto.conf, acl) is read from the repo; passwd is created
+      # here too so it stays on the host, git-ignored, and survives rebuilds.
+      - ./docker/mosquitto:/mosquitto/config
+      # Named volume: retained messages / persistence data.
+      - mosquitto_data:/mosquitto/data
+    # Mosquitto refuses to start when password_file does not exist yet, but
+    # bin/mqtt-user.* is allowed to run AFTER `up -d`. Pre-creating an empty
+    # (valid, zero-user) password file makes both orders work; with
+    # `allow_anonymous false` an empty file still rejects every connection.
+    command:
+      - sh
+      - -c
+      - touch /mosquitto/config/passwd && exec /usr/sbin/mosquitto -c /mosquitto/config/mosquitto.conf
+
+volumes:
+  mosquitto_data:
+    name: 3awedlou-mosquitto-data

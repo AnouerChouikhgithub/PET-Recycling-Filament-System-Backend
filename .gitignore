@@ -31,5 +31,11 @@
 .phpunit.result.cache
 *.log
 ###< tooling ###
+
+###> mqtt broker (local dev) ###
+# Broker credentials are SECRETS: created by bin/mqtt-user.ps1 / .sh, never
+# committed. Committed .env stays a secret-free skeleton.
+/docker/mosquitto/passwd
+###< mqtt broker (local dev) ###
 .env.dev
 .env.test

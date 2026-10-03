@@ -151,6 +151,10 @@ final class OwnershipAndAuditTest extends WebTestCase
         // if anyone adds/removes/renames a command value silently.
         $contract = file_get_contents(dirname(__DIR__, 2).'/docs/api-contract.md');
         self::assertIsString($contract);
+        // Normalize line endings first: with core.autocrlf=true the working
+        // copy of this document is CRLF on Windows while the committed blob
+        // is LF, and a `$` anchor must not silently depend on the platform.
+        $contract = str_replace("\r\n", "\n", $contract);
 
         // The whole list must sit on ONE "Commands:" line, every value backticked.
         preg_match('/^Commands:((?:\s+`[^`]+`)+)\.?$/m', $contract, $line);

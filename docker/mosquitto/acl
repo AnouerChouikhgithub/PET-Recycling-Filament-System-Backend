@@ -1,0 +1,29 @@
+# 3awedlou — Mosquitto ACL (development).
+#
+# RULE: the broker username of a machine MUST equal the identifier that the
+#       backend puts in the topic, i.e. Machine.identifier ("3awedlou-001"),
+#       NOT the machine UUID. bin/mqtt-user.ps1 enforces that you pass such a
+#       name; acl patterns (%u = authenticated username) then pin every
+#       device to its own topic branch.
+#
+# "3awedlou" below is the default MQTT_PREFIX. If you change MQTT_PREFIX you
+# MUST change every occurrence here too, otherwise the backend user and the
+# devices will be authorised against topics nobody publishes to.
+#
+# After editing this file: docker compose -f compose.mqtt.yaml restart mosquitto
+
+# ---------------------------------------------------------------- backend ----
+# The Symfony backend (publisher + app:mqtt:consume) needs the whole tree:
+# read the telemetry/status/events it consumes and write the commands it
+# publishes.
+user backend
+topic readwrite 3awedlou/#
+
+# ---------------------------------------------------------------- machines ----
+# Each device: write its OWN telemetry/status/events, read only its OWN
+# command topic. Publishing to another machine's topic matches no rule and is
+# denied (Mosquitto denies when nothing matches).
+pattern write 3awedlou/machines/%u/telemetry
+pattern write 3awedlou/machines/%u/status
+pattern write 3awedlou/machines/%u/events
+pattern read 3awedlou/machines/%u/commands

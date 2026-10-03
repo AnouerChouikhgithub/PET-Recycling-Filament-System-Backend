@@ -30,8 +30,9 @@ Every response — success or error — uses the same envelope:
 
 Error codes: `UNAUTHORIZED` `INVALID_CREDENTIALS` `INVALID_TOKEN` `TOKEN_EXPIRED`
 `TOKEN_NOT_FOUND` `FORBIDDEN` `MACHINE_NOT_FOUND` `VALIDATION_FAILED` `BAD_REQUEST`
-`NOT_FOUND` `NETWORK_ERROR` (client-side) `INTERNAL_ERROR`. Internal (500) details
-are never exposed to clients.
+`NOT_FOUND` `NETWORK_ERROR` (client-side) `MQTT_UNAVAILABLE` (503 — command
+transport down) `INTERNAL_ERROR`. Internal (500) details are never exposed to
+clients.
 
 ## Authentication
 
@@ -107,9 +108,9 @@ device-reportable lifecycle values — **never** `offline`) and `recordedAt`
 enforced (temperature −10…400 °C, diameter 0.5–4 mm, motorSpeed 0–10000 RPM…).
 
 Ingestion also refreshes `lastSeenAt` (connectivity signal) and applies a
-device-reported `status` to the machine. The HTTP endpoint and the future MQTT
-consumer share the **same** `TelemetryProcessor` — there is exactly one
-ingestion pipeline:
+device-reported `status` to the machine. The HTTP endpoint and the MQTT
+consumer (`app:mqtt:consume`) share the **same** `TelemetryProcessor` — there
+is exactly one ingestion pipeline:
 
 ```
 MQTT message  or  HTTP POST
@@ -149,18 +150,35 @@ Recycling record: `{id, sessionId, machineId, inputMaterial, inputMassGrams, out
 { "success": true, "data": {
   "machineId": "…", "identifier": "3awedlou-001", "command": "start",
   "value": null, "topic": "3awedlou/machines/3awedlou-001/commands",
-  "accepted": true, "sentAt": "…" } }
+  "accepted": true, "commandId": "uuid",
+  "delivery": "published_to_broker",      // or "buffered_not_sent"
+  "deviceAcknowledged": false,
+  "sentAt": "…", "expiresAt": "…" } }
 ```
 
 Commands: `start` `pause` `resume` `stop` `setTargetTemperature` `setMotorSpeed` `setFan`.
 
-**Safety guard** (backend-side, before any publish): offline machines accept
-nothing; `start` only from idle/error; `resume` only from paused; `pause`/`stop`
-only while running; numeric values are range-checked (heater ≤ 300 °C, motor/fan
-0–100 %). Violations → `422 VALIDATION_FAILED`. **Acceptance ≠ execution** — the
-ESP32 reports actual execution through telemetry/status.
+**Safety guard** (backend-side, before anything is audited or published):
+offline machines accept nothing; `start` only from idle/error; `resume` only
+from paused; `pause`/`stop` only while running; numeric values are range-checked
+(heater ≤ 300 °C, motor/fan 0–100 %). Violations → `422 VALIDATION_FAILED`.
 
-## MQTT architecture (phase 2 — transport not yet wired)
+**Response fields** (additive):
+
+| Field | Meaning |
+|---|---|
+| `commandId` | correlation id, equal to the `machine_command_audit` row id (future device acks correlate through it) |
+| `delivery` | `published_to_broker` (broker accepted the publish) or `buffered_not_sent` (`MQTT_ENABLED=false` — nothing left the process) |
+| `deviceAcknowledged` | always `false` today — no device acknowledgement exists yet |
+| `sentAt` / `expiresAt` | issue time and expiry (`sentAt + MQTT_COMMAND_TTL_SECONDS`, default 30 s) — firmware drops stale commands |
+
+When `MQTT_ENABLED=true` and the broker publish fails, the endpoint answers
+**503 `MQTT_UNAVAILABLE`** instead of 202 (the audit row records transport
+`mqtt-unavailable`). **Acceptance ≠ execution** — `published_to_broker` means
+the *broker* took the message, never that the machine ran it; the ESP32 reports
+actual execution through telemetry/status.
+
+## MQTT architecture (phase 3 — wired: publisher + consumer)
 
 Topic tree (prefix configurable via `MQTT_PREFIX`, default `3awedlou`):
 
@@ -173,11 +191,19 @@ Topic tree (prefix configurable via `MQTT_PREFIX`, default `3awedlou`):
 
 - The **frontend never publishes MQTT** — Web/Mobile → Symfony → MQTT → ESP32.
 - Broker credentials live only in backend env (`MQTT_HOST`, `MQTT_PORT`,
-  `MQTT_USERNAME`, `MQTT_PASSWORD`, `MQTT_CLIENT_ID`, `MQTT_TLS`, `MQTT_PREFIX`).
-- Today `MqttPublisherInterface` is implemented by a buffering logger; the real
-  broker client later swaps in via one alias in `config/services.yaml`.
-- The MQTT consumer will call `TelemetryProcessor` directly (same pipeline as
-  HTTP ingest — no duplicated logic).
+  `MQTT_USERNAME`, `MQTT_PASSWORD`, `MQTT_CLIENT_ID`, `MQTT_TLS`, `MQTT_PREFIX`,
+  `MQTT_QOS`, `MQTT_COMMAND_TTL_SECONDS`, `MQTT_MAX_PAYLOAD_BYTES`,
+  `MQTT_TELEMETRY_MAX_PER_SECOND`) — credentials belong in `.env.local` only.
+- `MqttPublisherInterface` selects the transport via `MQTT_ENABLED`:
+  `false` (default) → in-memory buffering logger (no socket);
+  `true` → real broker publisher; a broker failure surfaces as
+  **503 `MQTT_UNAVAILABLE`**, never as a fake 202.
+- The consumer (`app:mqtt:consume`) calls `TelemetryProcessor` directly (same
+  pipeline as HTTP ingest — no duplicated logic) and maps `status`
+  `{"online":bool}` onto `MachineConnectivityService`, so `lastSeenAt` /
+  derived-offline have one source of truth.
+- Full topic/payload/ACL contract, env reference and manual test recipes:
+  [`docs/mqtt-contract.md`](mqtt-contract.md).
 
 ## Realtime layer (abstraction in place, transport pluggable)
 
