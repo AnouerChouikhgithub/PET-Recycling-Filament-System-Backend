@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Create or update a Mosquitto broker user for the 3awedlou local dev broker.
 
@@ -10,13 +10,13 @@
     Security rules honoured here:
       * the password comes from the MQTT_USER_PASSWORD environment variable or
         from a hidden interactive prompt; it is never printed, never logged and
-        never placed in a host-side command line — only piped over stdin;
+        never placed in a host-side command line - only piped over stdin;
       * nothing is written to a git-tracked file.
 
 .PARAMETER Username
     Broker username. For a MACHINE this MUST equal Machine.identifier
     (e.g. 3awedlou-001) because the broker ACL pins each device to
-    {MQTT_PREFIX}/machines/%u/... — the name and the topic must match.
+    {MQTT_PREFIX}/machines/%u/... - the name and the topic must match.
     The backend's own user is called `backend`.
 
 .EXAMPLE
@@ -71,7 +71,7 @@ try {
         $password | docker exec -i $ContainerName sh -c 'IFS= read -r P; exec mosquitto_passwd -b /mosquitto/config/passwd "$1" "$P"' sh $Username
     }
     else {
-        Write-Host "Container '$ContainerName' is not running — creating docker/mosquitto/passwd with a one-shot container ..."
+        Write-Host "Container '$ContainerName' is not running - creating docker/mosquitto/passwd with a one-shot container ..."
         $password | docker run --rm -i -v "${configDir}:/mosquitto/config" $Image sh -c 'IFS= read -r P; exec mosquitto_passwd -b /mosquitto/config/passwd "$1" "$P"' sh $Username
     }
 }
@@ -86,6 +86,6 @@ if ($LASTEXITCODE -ne 0) {
 
 Write-Host "OK: user '$Username' written to docker/mosquitto/passwd (hashed, git-ignored)."
 if ($running) {
-    Write-Host 'NOTE: Mosquitto loads the password file at startup — restart the broker to pick up the change:'
+    Write-Host 'NOTE: Mosquitto loads the password file at startup - restart the broker to pick up the change:'
     Write-Host "      docker compose -f compose.mqtt.yaml restart mosquitto"
 }
