@@ -5,7 +5,7 @@ declare(strict_types=1);
 namespace App\Service\IoT;
 
 /**
- * Picks the outbound transport from MQTT_ENABLED.
+ * Picks the outbound transport from MQTT_ENABLED (via MqttConfig).
  *
  *   false (default) -> BufferingMqttPublisher: the historical in-memory
  *                      buffer + debug log. No socket is opened, so tests and
@@ -14,13 +14,14 @@ namespace App\Service\IoT;
  *   true            -> BrokerMqttPublisher, which reaches the real broker and
  *                      raises MqttUnavailableException when it cannot.
  *
- * Both collaborators are real MqttPublisherInterface instances injected by
- * config/services.yaml, so the whole choice is observable in a unit test.
+ * Taking MqttConfig (rather than a raw bool) means the switch and the payload
+ * settings share ONE source of truth — and lets a test flip the transport the
+ * same way production does.
  */
 final class SelectedMqttPublisher implements MqttPublisherInterface
 {
     public function __construct(
-        private readonly bool $enabled,
+        private readonly MqttConfig $config,
         private readonly MqttPublisherInterface $buffered,
         private readonly MqttPublisherInterface $broker,
     ) {
@@ -28,7 +29,7 @@ final class SelectedMqttPublisher implements MqttPublisherInterface
 
     public function publish(string $topic, string $payload, int $qos = 1): void
     {
-        if ($this->enabled) {
+        if ($this->config->isEnabled()) {
             $this->broker->publish($topic, $payload, $qos);
 
             return;
@@ -39,6 +40,6 @@ final class SelectedMqttPublisher implements MqttPublisherInterface
 
     public function isEnabled(): bool
     {
-        return $this->enabled;
+        return $this->config->isEnabled();
     }
 }

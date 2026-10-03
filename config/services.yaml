@@ -118,8 +118,13 @@ services:
     App\Service\IoT\MqttPublisherInterface: '@App\Service\IoT\SelectedMqttPublisher'
 
     App\Service\IoT\SelectedMqttPublisher:
+        # public on purpose: it is the single place the transport is chosen,
+        # so tests (and debug tooling) can swap or inspect it without touching
+        # the controller, the guard or the audit trail. Keeping it public also
+        # stops the container from inlining it into MachineCommandService.
+        public: true
         arguments:
-            $enabled: '%env(default:app.mqtt.enabled_default:bool:MQTT_ENABLED)%'
+            $config: '@App\Service\IoT\MqttConfig'
             $buffered: '@App\Service\IoT\BufferingMqttPublisher'
             $broker: '@App\Service\IoT\BrokerMqttPublisher'
 
