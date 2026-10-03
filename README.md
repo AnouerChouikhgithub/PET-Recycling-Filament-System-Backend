@@ -111,6 +111,59 @@ Then create the schema:
 php bin/console doctrine:database:create
 ```
 
+## Local MQTT broker (`docker/mosquitto` — development only)
+
+The broker lives in its **own** compose file on purpose: `compose.yaml` stays
+untouched, so the `symfony serve` `DATABASE_URL` auto-injection /
+two-database trap cannot come back.
+
+```powershell
+# 1) backend broker user (password is prompted with echo disabled, or set
+#    $env:MQTT_USER_PASSWORD — never printed, never written to git)
+.\bin\mqtt-user.ps1 backend
+
+# 2) one user per machine, named EXACTLY like Machine.identifier
+.\bin\mqtt-user.ps1 3awedlou-001
+
+# 3) start the broker — bound to 127.0.0.1:1883 only
+docker compose -f compose.mqtt.yaml up -d
+```
+
+`bin/mqtt-user.sh` is the equivalent for Linux/macOS. Both scripts run
+`mosquitto_passwd` *inside* the container (or a one-shot container when the
+broker is down), pipe the password over stdin — so it never appears in a
+command line — and write only the **hashed** file `docker/mosquitto/passwd`,
+which is **git-ignored**. Mosquitto reads that file once at startup, so if you
+add a user while the broker is already running, run
+`docker compose -f compose.mqtt.yaml restart mosquitto`.
+
+| Path | Purpose |
+|---|---|
+| `compose.mqtt.yaml` | one service: `eclipse-mosquitto:2`, `127.0.0.1:1883` |
+| `docker/mosquitto/mosquitto.conf` | listener, `allow_anonymous false`, `password_file`, `acl_file`, persistence |
+| `docker/mosquitto/acl` | `backend` → `readwrite {prefix}/#`; a device → its own topic branch only |
+| `docker/mosquitto/passwd` | hashed broker credentials — **git-ignored secret** |
+
+> ⚠️ **No TLS in development, on purpose.** Port 1883 is plaintext MQTT and is
+> bound to `127.0.0.1` only. **It must never be exposed to the internet** —
+> anyone who can reach it can sniff credentials and inject machine commands.
+> Any deployment (VPS, LAN, Raspberry Pi) **requires TLS on port 8883 plus
+> per-device credentials**; that is out of scope for this dev stack and is
+> **not implemented** in this repository.
+
+Once the broker and users exist, turn the transport on in `.env.local`
+(**never committed**) — with `MQTT_ENABLED` left at its `false` default the
+app keeps using the in-memory buffering publisher:
+
+```bash
+MQTT_ENABLED=true
+MQTT_USERNAME=backend
+MQTT_PASSWORD=  # the password you chose in step 1 — value never committed
+```
+
+Consumer command: `php bin/console app:mqtt:consume` — full contract in
+[`docs/mqtt-contract.md`](docs/mqtt-contract.md).
+
 ## Migrations
 
 ```bash
