@@ -149,7 +149,11 @@ services:
     # Non-secret fallback parameters. AGENT_ENABLED=false keeps every
     # /api/agent route answering 404 AGENT_DISABLED; nothing else changes.
 
+    # public on purpose: tests must share ONE stub instance with the
+    # orchestrator (inlined private services would fork state) and override
+    # AgentConfig per test for strict limits.
     App\Service\Agent\AgentConfig:
+        public: true
         arguments:
             $enabled: '%env(default:app.agent.enabled_default:bool:AGENT_ENABLED)%'
             $maxTokens: '%env(default:app.agent.max_tokens_default:int:AGENT_MAX_TOKENS)%'
@@ -163,3 +167,11 @@ services:
     # Phase 1 uses the SCRIPTED STUB only. Session 2 rebinds this alias to the
     # real Anthropic HTTP client; nothing else changes.
     App\Service\Agent\LlmClientInterface: '@App\Service\Agent\ScriptedStubLlmClient'
+
+    App\Service\Agent\ScriptedStubLlmClient:
+        public: true
+
+    # Agent logs route to the metadata-only 'agent' monolog channel.
+    App\Service\Agent\AgentOrchestrator:
+        arguments:
+            $agentLogger: '@monolog.logger.agent'
