@@ -50,6 +50,18 @@ class AgentTokenUsage
         $this->updatedAt = $this->createdAt;
     }
 
+    /** Row identifier (exposed for admin tooling / future API). */
+    public function getId(): Uuid
+    {
+        return $this->id;
+    }
+
+    /** The user this usage belongs to (used by retention/admin queries). */
+    public function getUser(): User
+    {
+        return $this->user;
+    }
+
     public function add(int $tokens): static
     {
         $this->tokensUsed += max(0, $tokens);

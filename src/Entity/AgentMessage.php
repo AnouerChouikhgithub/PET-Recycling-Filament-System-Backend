@@ -40,6 +40,8 @@ class AgentMessage
      * Metadata-only record of the tool calls this turn made: name + a short
      * summary. NEVER raw tool payloads (untrusted data must not be persisted
      * next to chat content and replayed later).
+     *
+     * @var list<array{name: string, summary: string}>|null
      */
     #[ORM\Column(type: Types::JSON, nullable: true)]
     private ?array $toolCalls = null;
