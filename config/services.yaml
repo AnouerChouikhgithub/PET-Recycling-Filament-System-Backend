@@ -7,6 +7,16 @@
 # Put parameters here that don't need to change on each machine where the app is deployed
 # https://symfony.com/doc/current/best_practices.html#use-parameters-for-application-configuration
 parameters:
+    # --- AI agent (phase 1) -------------------------------------------
+    # Non-secret fallbacks so the container boots even without the env vars.
+    app.agent.enabled_default: false
+    app.agent.max_tokens_default: 1024
+    app.agent.max_tool_rounds_default: 4
+    app.agent.context_messages_default: 12
+    app.agent.rate_limit_messages_default: 20
+    app.agent.rate_limit_interval_default: 300
+    app.agent.daily_token_cap_default: 200000
+    app.agent.msg_max_chars_default: 4000
     # Domain exception → stable API error code + HTTP status.
     # Consumed by App\Api\EventSubscriber\ApiExceptionSubscriber; add new
     # mappings here instead of editing subscriber code.
@@ -134,3 +144,22 @@ services:
 
     # add more service definitions when explicit configuration is needed
     # please note that last definitions always *replace* previous ones
+
+    # --- AI agent (phase 1) -----------------------------------------------
+    # Non-secret fallback parameters. AGENT_ENABLED=false keeps every
+    # /api/agent route answering 404 AGENT_DISABLED; nothing else changes.
+
+    App\Service\Agent\AgentConfig:
+        arguments:
+            $enabled: '%env(default:app.agent.enabled_default:bool:AGENT_ENABLED)%'
+            $maxTokens: '%env(default:app.agent.max_tokens_default:int:AGENT_MAX_TOKENS)%'
+            $maxToolRounds: '%env(default:app.agent.max_tool_rounds_default:int:AGENT_MAX_TOOL_ROUNDS)%'
+            $contextMessages: '%env(default:app.agent.context_messages_default:int:AGENT_CONTEXT_MESSAGES)%'
+            $rateLimitMessages: '%env(default:app.agent.rate_limit_messages_default:int:AGENT_RATE_LIMIT_MESSAGES)%'
+            $rateLimitIntervalSec: '%env(default:app.agent.rate_limit_interval_default:int:AGENT_RATE_LIMIT_INTERVAL_SEC)%'
+            $dailyTokenCap: '%env(default:app.agent.daily_token_cap_default:int:AGENT_DAILY_TOKEN_CAP)%'
+            $msgMaxChars: '%env(default:app.agent.msg_max_chars_default:int:AGENT_MSG_MAX_CHARS)%'
+
+    # Phase 1 uses the SCRIPTED STUB only. Session 2 rebinds this alias to the
+    # real Anthropic HTTP client; nothing else changes.
+    App\Service\Agent\LlmClientInterface: '@App\Service\Agent\ScriptedStubLlmClient'
