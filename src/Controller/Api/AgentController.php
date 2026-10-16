@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace App\Controller\Api;
 
 use App\Api\ApiResponse;
+use App\Api\Exception\AgentDailyTokenCapException;
+use App\Api\Exception\AgentLlmUnavailableException;
 use App\Api\Exception\ResourceNotFoundException;
 use App\Entity\User;
 use App\Repository\AgentConversationRepository;
@@ -74,32 +76,34 @@ final class AgentController
             return $response;
         }
 
-        // Per-user DAILY TOKEN CAP, checked against the persisted usage row
-        // (durable across deploys, per-user not per-IP - T3.2/T3.4).
-        if ($this->guard->isOverTokenCap($user)) {
-            $response = ApiResponse::error('AGENT_DAILY_TOKEN_CAP', 'Daily AI usage limit reached. Resets at 00:00 UTC.', 429);
-            $response->headers->set('Retry-After', '60');
-
-            return $response;
-        }
-
-        $this->guard->reserveTokens($user);
-
+        // NOTE (phase D): the daily token cap is enforced by the orchestrator
+        // with an ATOMIC per-user reserve BEFORE the LLM call (and before
+        // anything is persisted) - two parallel turns can never both spend
+        // the same remaining budget.
         try {
             $turn = $this->orchestrator->turn($user, $conversationId, $message);
         } catch (ResourceNotFoundException $exception) {
             return ApiResponse::error($exception->errorCode, $exception->getMessage(), 404);
-        }
+        } catch (AgentDailyTokenCapException) {
+            $response = ApiResponse::error('AGENT_DAILY_TOKEN_CAP', 'Daily AI usage limit reached. Resets at 00:00 UTC.', 429);
+            $response->headers->set('Retry-After', '60');
 
-        $this->guard->settle($turn['usage'], $user);
+            return $response;
+        } catch (AgentLlmUnavailableException) {
+            $response = ApiResponse::error('AGENT_LLM_UNAVAILABLE', 'The assistant service is temporarily unavailable. Please try again shortly.', 503);
+            $response->headers->set('Retry-After', '5');
+
+            return $response;
+        }
 
         return ApiResponse::success([
             'conversationId' => $turn['conversation']->getId()->toRfc4122(),
             'message' => [
+                'id' => $turn['assistantMessage']->getId()->toRfc4122(),
                 'role' => 'assistant',
                 'content' => $turn['answer'],
                 'toolCalls' => $turn['toolCalls'],
-                'createdAt' => (new \DateTimeImmutable())->format(\DateTimeInterface::ATOM),
+                'createdAt' => $turn['assistantMessage']->getCreatedAt()->format(\DateTimeInterface::ATOM),
             ],
         ], 200, ['usage' => $turn['usage']]);
     }
