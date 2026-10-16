@@ -20,7 +20,7 @@ namespace App\Service\Agent;
  */
 final class ScriptedStubLlmClient implements LlmClientInterface
 {
-    /** @var list<array<string, mixed>> */
+    /** @var list<array{blocks?: list<array<string, mixed>>, raw?: array<string, mixed>, throw?: bool}> */
     private array $script = [];
 
     /** @var list<array<string, mixed>> */
@@ -29,13 +29,35 @@ final class ScriptedStubLlmClient implements LlmClientInterface
     public int $calls = 0;
 
     /**
-     * Push a scripted response (a full content-blocks turn).
+     * Push a scripted response (a full content-blocks turn). Usage defaults
+     * to a small deterministic value so ordinary tests keep forwarding.
      *
      * @param list<array<string, mixed>> $contentBlocks
      */
     public function addResponse(array $contentBlocks): void
     {
-        $this->script[] = ['content' => $contentBlocks];
+        $this->script[] = ['blocks' => $contentBlocks];
+    }
+
+    /**
+     * Push a FULL raw response returned EXACTLY as given (no injected
+     * defaults) - used to test usage accounting exactly as the provider may
+     * report it (missing usage, zeroes).
+     *
+     * @param array<string, mixed> $response
+     */
+    public function addRawResponse(array $response): void
+    {
+        $this->script[] = ['raw' => $response];
+    }
+
+    /**
+     * Push a scripted PROVIDER FAILURE: the next complete() call throws,
+     * driving the orchestrator's reconcile-on-failure path deterministically.
+     */
+    public function addFailure(): void
+    {
+        $this->script[] = ['throw' => true];
     }
 
     public function reset(): void
@@ -51,7 +73,15 @@ final class ScriptedStubLlmClient implements LlmClientInterface
         $this->receivedMessages = $messages;
 
         if ([] !== $this->script) {
-            return array_shift($this->script) + ['role' => 'assistant', 'usage' => ['input' => 10, 'output' => 10]];
+            $next = array_shift($this->script);
+            if (\array_key_exists('throw', $next)) {
+                throw new \RuntimeException('scripted provider failure');
+            }
+            if (\array_key_exists('raw', $next)) {
+                return $next['raw'];
+            }
+
+            return ['content' => $next['blocks']] + ['role' => 'assistant', 'usage' => ['input' => 10, 'output' => 10]];
         }
 
         return [

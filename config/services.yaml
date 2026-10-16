@@ -17,6 +17,12 @@ parameters:
     app.agent.rate_limit_interval_default: 300
     app.agent.daily_token_cap_default: 200000
     app.agent.msg_max_chars_default: 4000
+    # Provider request fields (non-secret). The model name comes from env;
+    # the key never touches this file.
+    app.agent.model_default: claude-sonnet-4-5
+    app.agent.base_url_default: 'https://api.anthropic.com'
+    app.agent.connect_timeout_default: 5
+    app.agent.request_timeout_default: 30
     # Domain exception → stable API error code + HTTP status.
     # Consumed by App\Api\EventSubscriber\ApiExceptionSubscriber; add new
     # mappings here instead of editing subscriber code.
@@ -27,6 +33,14 @@ parameters:
         'App\Api\Exception\MqttUnavailableException':
             status: 503
             code: MQTT_UNAVAILABLE
+        # LLM provider failures: ONE controlled code for clients, provider
+        # detail stays in the agent log channel (metadata only).
+        'App\Api\Exception\AgentLlmUnavailableException':
+            status: 503
+            code: AGENT_LLM_UNAVAILABLE
+        'App\Api\Exception\AgentDailyTokenCapException':
+            status: 429
+            code: AGENT_DAILY_TOKEN_CAP
 
     # Machine command safety limits (validated against the firmware's real
     # PID target: 245 °C for PET). The heater cap stays above the target so
@@ -163,10 +177,24 @@ services:
             $rateLimitIntervalSec: '%env(default:app.agent.rate_limit_interval_default:int:AGENT_RATE_LIMIT_INTERVAL_SEC)%'
             $dailyTokenCap: '%env(default:app.agent.daily_token_cap_default:int:AGENT_DAILY_TOKEN_CAP)%'
             $msgMaxChars: '%env(default:app.agent.msg_max_chars_default:int:AGENT_MSG_MAX_CHARS)%'
+            $model: '%env(default:app.agent.model_default:string:AGENT_MODEL)%'
+            $baseUrl: '%env(default:app.agent.base_url_default:string:AGENT_BASE_URL)%'
+            $connectTimeoutSec: '%env(default:app.agent.connect_timeout_default:int:AGENT_CONNECT_TIMEOUT_SEC)%'
+            $requestTimeoutSec: '%env(default:app.agent.request_timeout_default:int:AGENT_REQUEST_TIMEOUT_SEC)%'
 
-    # Phase 1 uses the SCRIPTED STUB only. Session 2 rebinds this alias to the
-    # real Anthropic HTTP client; nothing else changes.
-    App\Service\Agent\LlmClientInterface: '@App\Service\Agent\ScriptedStubLlmClient'
+    # REAL provider (session 2). The TEST environment rebinds this alias to
+    # the scripted stub (config/packages/test/services.yaml) so the suite
+    # never performs a live request; production/dev runtime uses this.
+    App\Service\Agent\LlmClientInterface: '@App\Service\Agent\AnthropicClient'
+
+    # The ONLY class that reads the key or uses the network. Key comes from
+    # the environment (untracked .env.local / process env), NEVER from a
+    # committed file; empty key => controlled 503, no requests, no retries.
+    App\Service\Agent\AnthropicClient:
+        arguments:
+            $httpClient: '@http_client'
+            $apiKey: '%env(string:ANTHROPIC_API_KEY)%'
+            $agentLogger: '@monolog.logger.agent'
 
     App\Service\Agent\ScriptedStubLlmClient:
         public: true
@@ -175,3 +203,12 @@ services:
     App\Service\Agent\AgentOrchestrator:
         arguments:
             $agentLogger: '@monolog.logger.agent'
+
+when@test:
+    services:
+        # The test environment NEVER makes a live provider request: the LLM
+        # alias is rebound to the scripted stub (bound LAST so it wins over
+        # the default binding above). The real AnthropicClient stays wired
+        # and is covered by its own unit tests with a MockHttpClient - no
+        # functional test touches the network or needs a real key.
+        App\Service\Agent\LlmClientInterface: '@App\Service\Agent\ScriptedStubLlmClient'
