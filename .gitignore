@@ -39,3 +39,9 @@
 ###< mqtt broker (local dev) ###
 .env.dev
 .env.test
+
+###> symfony config builder ###
+# Generated on cache warm by Symfony (IDE autocompletion for config(). Initialises
+# itself; committing it kept the tree permanently "dirty" (BUGS-TO-FIX F5).
+/config/reference.php
+###< symfony config builder ###

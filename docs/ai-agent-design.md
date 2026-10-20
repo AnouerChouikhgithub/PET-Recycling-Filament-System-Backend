@@ -257,13 +257,30 @@ Rate limits (Symfony RateLimiter, sliding window, per-user id key, NOT IP):
 | agent_chat         | 20 messages / 5 min  | 429 AGENT_RATE_LIMITED        |
 | agent_daily_tokens | AGENT_DAILY_TOKEN_CAP (default 200k) | 429 AGENT_DAILY_TOKEN_CAP |
 
+The message window lives in the shared cache pool
+(`framework.cache.pools.agent_rate_limiter`, backing store = `cache.app`). It
+MUST NOT be a per-object store: the guard is instantiated per request, so an
+in-memory window resets every time and the limit never fires under php-fpm or
+`php -S` (BUGS-TO-FIX F3, reproduced and fixed). Point `cache.app` at Redis and
+the window becomes shared across servers with no code change.
+
 Token accounting: usage from every Anthropic response (input+output) is
 accumulated per user per UTC day in a small Doctrine table (DECIDED:
 agent_token_usage, user_id + utc_date + counters, not a filesystem pool -
-durable across deploys; Redis stays Future); the check runs BEFORE the call,
-the usage is written AFTER (even on error). Anonymous/empty usage responses are counted
-with a conservative default (say 1k) so a schema change cannot silently lift
-the cap.
+durable across deploys; Redis stays Future); the WORST-CASE estimate for the
+whole turn is reserved atomically BEFORE the first call, then settled:
+
+| Outcome | Billed |
+|---|---|
+| success, provider reported usage | reported input + output |
+| success, usage missing/zero | 1 000-token floor (T3.3) |
+| provider call failed after a request went out | completed-call usage + 1 000 floor (the provider may have generated) |
+| pre-flight refusal (no credentials, nothing sent) | completed-call usage only - **no floor** |
+| turn died before the first model call (persistence/context) | completed-call usage only (normally 0) - **no floor** |
+
+The last two rows are BUGS-TO-FIX F4: a turn the provider never saw must not
+consume the user's day. Everything else keeps a conservative floor so a
+schema change or a crash cannot silently lift the cap.
 
 Conversation limits: 1..4000 chars per message; context window = last 12
 messages; 4 tool rounds per turn; model max_tokens 1024 (env).
@@ -290,7 +307,8 @@ NEVER real values)
     AGENT_CONTEXT_MESSAGES=12
     AGENT_RATE_LIMIT_MESSAGES=20         # per 5 min per user
     AGENT_RATE_LIMIT_WINDOW=5 minutes
-    AGENT_DAILY_TOKEN_CAP=200000         # per user per UTC day
+    AGENT_DAILY_TOKEN_CAP=200000         # per user per UTC day (see docs/ai-agent-design.md §7 for what a
+                                         # failed turn bills: nothing when no request was sent, else a 1k floor)
     AGENT_RETENTION_DAYS=90
 
 Failure of the LLM call -> 503 AGENT_LLM_UNAVAILABLE (no retry storm: one

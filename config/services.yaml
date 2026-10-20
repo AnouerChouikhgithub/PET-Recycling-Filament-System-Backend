@@ -204,6 +204,14 @@ services:
         arguments:
             $agentLogger: '@monolog.logger.agent'
 
+    # The rate limiter window MUST come from the shared cache pool (see
+    # config/packages/cache.yaml). Without this argument the container would
+    # fall back to a per-request in-memory store and never rate limit
+    # (BUGS-TO-FIX F3).
+    App\Service\Agent\TurnGuard:
+        arguments:
+            $limiterPool: '@agent_rate_limiter'
+
 when@test:
     services:
         # The test environment NEVER makes a live provider request: the LLM

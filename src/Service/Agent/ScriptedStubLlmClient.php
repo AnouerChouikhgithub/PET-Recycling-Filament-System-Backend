@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace App\Service\Agent;
 
+use App\Api\Exception\AgentLlmNotAttemptedException;
+
 /**
  * SCRIPTED STUB - the only LlmClientInterface implementation in phase 1.
  *
@@ -20,7 +22,7 @@ namespace App\Service\Agent;
  */
 final class ScriptedStubLlmClient implements LlmClientInterface
 {
-    /** @var list<array{blocks?: list<array<string, mixed>>, raw?: array<string, mixed>, throw?: bool}> */
+    /** @var list<array{blocks?: list<array<string, mixed>>, raw?: array<string, mixed>, throw?: bool, notAttempted?: bool}> */
     private array $script = [];
 
     /** @var list<array<string, mixed>> */
@@ -60,6 +62,16 @@ final class ScriptedStubLlmClient implements LlmClientInterface
         $this->script[] = ['throw' => true];
     }
 
+    /**
+     * Push a scripted PRE-FLIGHT REFUSAL: the client refuses before anything
+     * is sent (as the real client does with no credentials), so the turn must
+     * be refunded in full instead of billed the conservative floor.
+     */
+    public function addNotAttemptedFailure(): void
+    {
+        $this->script[] = ['notAttempted' => true];
+    }
+
     public function reset(): void
     {
         $this->script = [];
@@ -76,6 +88,9 @@ final class ScriptedStubLlmClient implements LlmClientInterface
             $next = array_shift($this->script);
             if (\array_key_exists('throw', $next)) {
                 throw new \RuntimeException('scripted provider failure');
+            }
+            if (\array_key_exists('notAttempted', $next)) {
+                throw new AgentLlmNotAttemptedException('The assistant service is not configured.');
             }
             if (\array_key_exists('raw', $next)) {
                 return $next['raw'];

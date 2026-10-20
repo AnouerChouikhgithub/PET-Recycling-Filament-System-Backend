@@ -6,10 +6,17 @@ namespace App\Tests\Agent;
 
 use App\Api\Exception\AgentDailyTokenCapException;
 use App\Entity\User;
+use App\Repository\AgentConversationRepository;
+use App\Repository\AgentMessageRepository;
 use App\Repository\AgentTokenUsageRepository;
 use App\Service\Agent\AgentConfig;
+use App\Service\Agent\AgentOrchestrator;
+use App\Service\Agent\LlmClientInterface;
+use App\Service\Agent\ToolInputValidator;
+use App\Service\Agent\ToolRegistry;
 use App\Service\Agent\TurnGuard;
 use Doctrine\ORM\EntityManagerInterface;
+use Psr\Log\NullLogger;
 use Symfony\Bundle\FrameworkBundle\Test\KernelTestCase;
 use Symfony\Component\PasswordHasher\Hasher\UserPasswordHasherInterface;
 use Symfony\Component\Uid\Uuid;
@@ -111,6 +118,81 @@ final class TokenAccountingTest extends KernelTestCase
         self::assertSame(1400, $this->tokensUsed($user), 'partial usage + floor, estimate remainder refunded');
     }
 
+    /**
+     * F4: a turn that never reached the provider is refunded IN FULL - no
+     * floor. Charging ~1000 tokens per attempt let ~200 retries against a
+     * down provider exhaust the default 200 000 daily cap without a single
+     * answer being produced (BUGS-TO-FIX F4).
+     */
+    public function testUnsentTurnIsRefundedInFull(): void
+    {
+        $user = $this->createUser('tok7');
+        $estimate = $this->estimateOf(200000);
+        $guard = $this->guardWithCap(200000);
+
+        $guard->reserveTurn($user);
+        self::assertSame($estimate, $this->tokensUsed($user));
+
+        $guard->refundFailedTurn($user, $estimate, 0);
+
+        self::assertSame(0, $this->tokensUsed($user), 'F4: a turn with no provider work costs nothing');
+    }
+
+    /** F4: a refund keeps the REAL usage of calls that did complete. */
+    public function testUnsentTurnStillKeepsTheRealUsageOfCompletedCalls(): void
+    {
+        $user = $this->createUser('tok9');
+        $estimate = $this->estimateOf(200000);
+        $guard = $this->guardWithCap(200000);
+
+        $guard->reserveTurn($user);
+        $guard->refundFailedTurn($user, $estimate, 480);
+
+        self::assertSame(480, $this->tokensUsed($user), 'only real provider usage is kept - never the floor');
+    }
+
+    /**
+     * F4 end-to-end: the orchestrator's own failure path must refund a turn
+     * that died BEFORE the first model call. The entity manager is replaced
+     * by one whose first flush throws (persistence failure on the user
+     * message), so nothing was sent anywhere.
+     */
+    public function testOrchestratorRefundsATurnThatNeverReachedTheModel(): void
+    {
+        $user = $this->createUser('tok10');
+        $container = static::getContainer();
+
+        // A stub, not a mock: no behaviour is expected FROM the entity manager
+        // (PHPUnit would flag an expectation-free mock), only this one configured
+        // failure - flush throws so the turn dies before any model call.
+        $em = $this->createStub(EntityManagerInterface::class);
+        $em->method('flush')->willThrowException(new \RuntimeException('storage is down'));
+
+        $orchestrator = new AgentOrchestrator(
+            $container->get(LlmClientInterface::class), // scripted stub: must never be called
+            $container->get(ToolRegistry::class),
+            $container->get(AgentConversationRepository::class),
+            $container->get(AgentMessageRepository::class),
+            $em,
+            new NullLogger(),
+            $container->get(AgentConfig::class),
+            $container->get(TurnGuard::class),
+            $container->get(ToolInputValidator::class),
+        );
+
+        try {
+            $orchestrator->turn($user, null, 'hello');
+            self::fail('the persistence failure must propagate to the caller');
+        } catch (\RuntimeException $exception) {
+            self::assertSame('storage is down', $exception->getMessage());
+        }
+
+        $stub = $container->get(LlmClientInterface::class);
+        self::assertInstanceOf(\App\Service\Agent\ScriptedStubLlmClient::class, $stub);
+        self::assertSame(0, $stub->calls, 'the turn must have died before any model call');
+        self::assertSame(0, $this->tokensUsed($user), 'F4: no provider work means no charge and no floor');
+    }
+
     /** UTC-day keying: rows per (user, day) are independent. */
     public function testUtcDayRowsAreIndependent(): void
     {
@@ -194,6 +276,7 @@ final class TokenAccountingTest extends KernelTestCase
         return new TurnGuard(
             $this->config($dailyCap),
             static::getContainer()->get(AgentTokenUsageRepository::class),
+            static::getContainer()->get('agent_rate_limiter'),
         );
     }
 

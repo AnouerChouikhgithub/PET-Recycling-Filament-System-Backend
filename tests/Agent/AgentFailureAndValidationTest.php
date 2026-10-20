@@ -64,6 +64,31 @@ final class AgentFailureAndValidationTest extends AgentApiTestCase
         self::assertSame(\App\Service\Agent\TurnGuard::MISSING_USAGE_ESTIMATE, $row->getTokensUsed(), 'T3.3 missing usage -> 1000-token floor, never zero');
     }
 
+    /**
+     * F4: a PRE-FLIGHT refusal (no credentials, so no request was ever sent)
+     * must refund the reservation completely. The provider cannot have
+     * generated a token, so the conservative floor would be a pure loss.
+     */
+    public function testPreflightRefusalRefundsTheWholeReservation(): void
+    {
+        $owner = $this->createUser('f7', 'fail-pass-123');
+        $this->login((string) $owner['email'], (string) $owner['password']);
+
+        $this->stub()->addNotAttemptedFailure();
+
+        $this->client->request('POST', '/api/agent/chat', [], [], ['CONTENT_TYPE' => 'application/json'], (string) json_encode(['message' => 'hello']));
+        self::assertResponseStatusCodeSame(503, 'same controlled 503 the client always sees');
+        self::assertSame('AGENT_LLM_UNAVAILABLE', $this->json()['error']['code']);
+
+        $row = $this->em->getRepository(AgentTokenUsage::class)->findOneBy(['user' => $owner['user']]);
+        self::assertNotNull($row, 'the attempt is still accounted - the row exists, refunded to zero');
+        self::assertSame(
+            0,
+            $row->getTokensUsed(),
+            'F4: nothing was sent, so nothing (not even the 1000-token floor) may be billed',
+        );
+    }
+
     public function testModelGeneratedToolInputIsSchemaValidatedBeforeExecution(): void
     {
         $owner = $this->createUser('f3', 'fail-pass-123');

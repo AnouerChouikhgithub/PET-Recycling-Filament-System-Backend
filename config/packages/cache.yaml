@@ -15,5 +15,26 @@ framework:
         #app: cache.adapter.apcu
 
         # Namespaced pools use the above "app" backend by default
-        #pools:
-            #my.dedicated.cache: null
+        pools:
+            # Shared store for the AI agent's per-user MESSAGE rate limit.
+            # It MUST be a real (out-of-process) pool: the limiter window has
+            # to survive between requests, otherwise AGENT_RATE_LIMIT_MESSAGES
+            # can never produce a 429 in a per-request SAPI (BUGS-TO-FIX F3).
+            # default_lifetime: 0 = items keep their own expiry (the sliding
+            # window sets it), so the pool never silently expires a window.
+            agent_rate_limiter:
+                adapter: cache.app
+                default_lifetime: 0
+
+when@test:
+    framework:
+        cache:
+            pools:
+                # NOT the array adapter: TestContainer resets every pool
+                # between requests, and ArrayAdapter::reset() clears its data,
+                # which would make the cross-request window untestable (and
+                # silently re-hide F3). The filesystem pool keeps the window
+                # across requests exactly like dev/prod; keys are per-user
+                # UUIDs, so entries cannot leak between test methods.
+                agent_rate_limiter:
+                    adapter: cache.adapter.filesystem

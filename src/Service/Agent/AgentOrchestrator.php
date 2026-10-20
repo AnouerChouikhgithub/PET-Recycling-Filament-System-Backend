@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Service\Agent;
 
 use App\Api\Exception\AgentDailyTokenCapException;
+use App\Api\Exception\AgentLlmNotAttemptedException;
 use App\Api\Exception\AgentLlmUnavailableException;
 use App\Api\Exception\ResourceNotFoundException;
 use App\Entity\AgentConversation;
@@ -37,10 +38,18 @@ final class ReconciledLlmFailure extends AgentLlmUnavailableException
  *     -> persist assistant message + settle the REAL usage in ONE
  *        transaction (or reconcile the conservative floor on failure)
  *
- * Provider/turn failures: the reservation is reconciled (billed at the
- * conservative floor, remainder refunded) and a controlled
+ * Provider/turn failures: the reservation is reconciled and a controlled
  * AgentLlmUnavailableException (503) / cap exception (429) is rethrown -
  * no client ever sees provider details and no turn is double-billed.
+ * Accounting is honest about what actually happened:
+ *
+ *   - a failure before the first model call (persistence/context) and a
+ *     pre-flight provider refusal (nothing was sent) refund the estimate
+ *     completely - no floor (BUGS-TO-FIX F4);
+ *   - a provider call that failed after a request went out keeps the
+ *     conservative MISSING_USAGE_ESTIMATE floor (the provider may have
+ *     generated tokens);
+ *   - every failure still bills whatever COMPLETED calls really reported.
  *
  * Logging: agent channel, METADATA ONLY (ids, tool names, counts) - never
  * message content or tool payloads (docs/ai-agent-test-plan.md T7.3).
@@ -77,8 +86,14 @@ final class AgentOrchestrator
         $this->guard->reserveTurn($user); // throws AgentDailyTokenCapException when the cap is full
         $isNew = null === $conversationId;
 
+        // Provider-reported usage of every COMPLETED call in this turn. The
+        // failure paths below settle with it, so a turn that never reached
+        // the provider is refunded in full instead of being billed the
+        // conservative floor (BUGS-TO-FIX F4).
+        $spent = ['input' => 0, 'output' => 0];
+
         try {
-            return $this->completeTurn($conversation, $user, $message, $reserve, $isNew);
+            return $this->completeTurn($conversation, $user, $message, $reserve, $isNew, $spent);
         } catch (\Throwable $exception) {
             if ($exception instanceof AgentDailyTokenCapException
                 || $exception instanceof ResourceNotFoundException
@@ -87,17 +102,23 @@ final class AgentOrchestrator
                 throw $exception;
             }
 
-            // Not yet reconciled (pre-model failure, persistence failure):
-            // bill at least the conservative floor, refund the estimate rest.
-            $this->guard->reconcileFailedTurn($user, $reserve);
+            // Not yet reconciled: a pre-model failure (persistence, context) or
+            // a post-model persistence failure. Bill exactly what the provider
+            // reported - 0 when nothing was sent - and refund the estimate
+            // rest. No floor here: the turn produced nothing to charge for.
+            $this->guard->refundFailedTurn($user, $reserve, $spent['input'] + $spent['output']);
             throw $exception;
         }
     }
 
     /**
+     * @param array{input: int, output: int} $usageTotal accumulated by-ref so the
+     *                                                  caller can settle a failed
+     *                                                  turn with the REAL spend
+     *
      * @return array{conversation: AgentConversation, assistantMessage: AgentMessage, answer: string, toolCalls: list<array{name: string, summary: string}>, usage: array{input: int, output: int}, toolResults: list<array<string, mixed>>}
      */
-    private function completeTurn(AgentConversation $conversation, User $user, string $message, int $reserve, bool $isNewConversation): array
+    private function completeTurn(AgentConversation $conversation, User $user, string $message, int $reserve, bool $isNewConversation, array &$usageTotal): array
     {
         $userMessage = new AgentMessage($conversation, AgentMessage::ROLE_USER, $message);
         $this->em->persist($userMessage);
@@ -111,7 +132,6 @@ final class AgentOrchestrator
 
         $toolCalls = [];
         $toolResults = [];
-        $usageTotal = ['input' => 0, 'output' => 0];
 
         $llmMessages = [];
         $llmMessages[] = ['role' => 'system', 'content' => SystemPrompt::TEXT];
@@ -227,9 +247,11 @@ final class AgentOrchestrator
     }
 
     /**
-     * One provider call. On failure: reconcile the reservation (conservative
-     * floor for what was spent, remainder refunded) and rethrow as the
-     * controlled 503 exception - the raw provider reason never escapes here.
+     * One provider call. On failure: settle the reservation and rethrow as
+     * the controlled 503 exception - the raw provider reason never escapes
+     * here. A "not attempted" failure (nothing was sent) refunds the turn;
+     * any other provider failure keeps the conservative floor because the
+     * provider may already have generated tokens (BUGS-TO-FIX F4).
      *
      * @param list<array<string, mixed>> $llmMessages
      * @param list<array<string, mixed>> $tools
@@ -241,11 +263,17 @@ final class AgentOrchestrator
     {
         try {
             $response = $this->llm->complete($llmMessages, $tools);
-        } catch (\Throwable) {
-            // Reconcile ONCE here (never also in the outer catch): bill the
-            // completed-provider-call usage plus the conservative floor for
-            // the failed call, refund the rest of the estimate.
-            $this->guard->reconcileFailedTurn($user, $reserve, $usageTotal['input'] + $usageTotal['output']);
+        } catch (\Throwable $failure) {
+            // Reconcile ONCE here (never also in the outer catch): settle the
+            // completed-provider-call usage plus, when a request actually went
+            // out, the conservative floor for the failed call - and refund the
+            // rest of the estimate.
+            $actual = $usageTotal['input'] + $usageTotal['output'];
+            if ($failure instanceof AgentLlmNotAttemptedException) {
+                $this->guard->refundFailedTurn($user, $reserve, $actual);
+            } else {
+                $this->guard->reconcileFailedTurn($user, $reserve, $actual);
+            }
 
             throw new ReconciledLlmFailure();
         }

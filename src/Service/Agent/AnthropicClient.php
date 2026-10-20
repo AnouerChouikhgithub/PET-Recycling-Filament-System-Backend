@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Service\Agent;
 
+use App\Api\Exception\AgentLlmNotAttemptedException;
 use App\Api\Exception\AgentLlmUnavailableException;
 use Psr\Log\LoggerInterface;
 use Symfony\Contracts\HttpClient\Exception\TransportExceptionInterface;
@@ -63,7 +64,9 @@ final class AnthropicClient implements LlmClientInterface
     {
         if ('' === $this->apiKey) {
             // Controlled credential failure: no request, no retry, no detail.
-            throw new AgentLlmUnavailableException('The assistant service is not configured.');
+            // "Not attempted" so the orchestrator refunds the turn's token
+            // reservation instead of billing a floor for work that never ran.
+            throw new AgentLlmNotAttemptedException('The assistant service is not configured.');
         }
 
         try {

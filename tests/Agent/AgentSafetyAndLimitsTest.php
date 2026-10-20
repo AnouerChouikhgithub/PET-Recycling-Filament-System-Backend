@@ -7,7 +7,11 @@ namespace App\Tests\Agent;
 use App\Entity\Machine;
 use App\Entity\MachineStatus;
 use App\Entity\MachineTelemetry;
+use App\Service\Agent\AgentConfig;
 use Doctrine\ORM\EntityManagerInterface;
+use Psr\Cache\CacheItemPoolInterface;
+use Symfony\Component\RateLimiter\RateLimiterFactory;
+use Symfony\Component\RateLimiter\Storage\CacheStorage;
 
 /**
  * Injection (T2), hard safety gate (T4), limits (T3), validation and log
@@ -70,6 +74,7 @@ final class AgentSafetyAndLimitsTest extends AgentApiTestCase
     {
         $owner = $this->createUser('rl1', 'rl-pass-123');
         $this->login((string) $owner['email'], (string) $owner['password']);
+        $this->clearRateLimitWindow();
 
         for ($i = 0; $i < 20; ++$i) {
             $this->stub()->addResponse([['type' => 'text', 'text' => 'ok']]);
@@ -83,6 +88,45 @@ final class AgentSafetyAndLimitsTest extends AgentApiTestCase
         self::assertSame('AGENT_RATE_LIMITED', $this->json()['error']['code']);
         self::assertNotNull($this->client->getResponse()->headers->get('Retry-After'));
         self::assertSame($callsBefore, $this->stub()->calls, 'T3.1 no LLM call happens when rate limited');
+    }
+
+    /**
+     * F3 regression: the rate-limit window must live in the SHARED cache pool,
+     * not in the guard object. Consuming the container's pool directly has to
+     * make the next API turn 429 - that is only true when the guard reads the
+     * same store, which is exactly what per-request InMemoryStorage broke
+     * (BUGS-TO-FIX F3: limit 3, four turns accepted in the wild).
+     */
+    public function testRateLimitWindowIsStoredInTheSharedPoolNotTheGuard(): void
+    {
+        $owner = $this->createUser('rl2', 'rl-pass-123');
+        $this->login((string) $owner['email'], (string) $owner['password']);
+        $this->clearRateLimitWindow();
+
+        $config = static::getContainer()->get(AgentConfig::class);
+        /** @var CacheItemPoolInterface $pool */
+        $pool = static::getContainer()->get('agent_rate_limiter');
+
+        // Same limiter definition and same key as TurnGuard::key() - the
+        // window is identified by 'agent_chat' + 'agent-user-<uuid>'.
+        $limiter = new RateLimiterFactory([
+            'id' => 'agent_chat',
+            'policy' => 'sliding_window',
+            'limit' => max(1, $config->rateLimitMessages),
+            'interval' => '+'.$config->rateLimitIntervalSec.' seconds',
+        ], new CacheStorage($pool));
+
+        $key = 'agent-user-'.$owner['user']->getId()->toRfc4122();
+        for ($i = 0; $i < $config->rateLimitMessages; ++$i) {
+            self::assertTrue($limiter->create($key)->consume()->isAccepted(), 'pre-consumed message '.($i + 1).' is inside the window');
+        }
+
+        $callsBefore = $this->stub()->calls;
+        $this->client->request('POST', '/api/agent/chat', [], [], ['CONTENT_TYPE' => 'application/json'], (string) json_encode(['message' => 'over the pre-consumed window']));
+
+        self::assertResponseStatusCodeSame(429, 'the API turn must see the window the pool already holds');
+        self::assertSame('AGENT_RATE_LIMITED', $this->json()['error']['code']);
+        self::assertSame($callsBefore, $this->stub()->calls, 'no LLM call happens when rate limited');
     }
 
     public function testEmptyAndOversizedMessagesAre422(): void
@@ -144,5 +188,15 @@ final class AgentSafetyAndLimitsTest extends AgentApiTestCase
         } catch (\Symfony\Component\HttpKernel\Exception\NotFoundHttpException $exception) {
             self::assertSame('AGENT_DISABLED', $exception->getMessage(), 'T4.4 what the exception subscriber would render');
         }
+    }
+
+    /**
+     * The message window now lives OUTSIDE the process (shared pool), so each
+     * rate-limit test starts from a known-empty window instead of inheriting
+     * whatever an earlier run left behind.
+     */
+    private function clearRateLimitWindow(): void
+    {
+        static::getContainer()->get('agent_rate_limiter')->clear();
     }
 }

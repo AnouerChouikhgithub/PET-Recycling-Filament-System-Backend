@@ -7,8 +7,9 @@ namespace App\Service\Agent;
 use App\Api\Exception\AgentDailyTokenCapException;
 use App\Entity\User;
 use App\Repository\AgentTokenUsageRepository;
+use Psr\Cache\CacheItemPoolInterface;
 use Symfony\Component\RateLimiter\RateLimiterFactory;
-use Symfony\Component\RateLimiter\Storage\InMemoryStorage;
+use Symfony\Component\RateLimiter\Storage\CacheStorage;
 
 /**
  * Per-USER turn guard: message rate limit + daily token cap. Keys are the
@@ -28,12 +29,20 @@ use Symfony\Component\RateLimiter\Storage\InMemoryStorage;
  *      silently lift the cap.
  *   3. reconcileFailedTurn() runs when the provider/turn failed after the
  *      reservation: it bills max(actual-so-far floor, 0) + T3.3 floor and
- *      refunds the rest of the estimate, so failures cost at most the
- *      documented conservative floor, never zero - a schema change or a
- *      crash cannot silently lift the cap.
+ *      refunds the rest of the estimate, so a provider failure costs at
+ *      most the documented conservative floor - a schema change or a crash
+ *      cannot silently lift the cap.
+ *   4. refundFailedTurn() runs when the failure is provably NOT provider
+ *      work (pre-model failure, or a pre-flight refusal before any request
+ *      was sent): it bills only what COMPLETED calls really reported - no
+ *      floor - so an unreachable/short-circuited turn cannot eat the day's
+ *      budget (BUGS-TO-FIX F4).
  *
  * Everything lives in the agent_token_usage table (durable across deploys):
  * no in-memory counter participates in cap enforcement.
+ *
+ * The message rate-limit window lives in the INJECTED shared cache pool, so
+ * it survives between requests (BUGS-TO-FIX F3) while the cap stays in SQL.
  */
 final class TurnGuard
 {
@@ -45,11 +54,16 @@ final class TurnGuard
     public function __construct(
         private readonly AgentConfig $config,
         private readonly AgentTokenUsageRepository $usage,
+        CacheItemPoolInterface $limiterPool,
     ) {
-        // Per-user sliding window built per-request from env-resolved values
-        // (symfony rate_limiter.yaml is per-config, so this factory is
-        // constructed here with array storage scoped to this guard - the
-        // token cap is the durable limit; the message window is rate only).
+        // Per-user sliding window built from env-resolved values (the token
+        // cap is the durable limit; the message window is rate only).
+        //
+        // The state MUST live in $limiterPool - a shared, cross-request store
+        // (framework.cache.pools.agent_rate_limiter). With per-object memory
+        // (InMemoryStorage) the window was recreated on every request in any
+        // per-request SAPI, so AGENT_RATE_LIMIT_MESSAGES never produced a 429
+        // (BUGS-TO-FIX F3, reproduced live: limit 3, four turns accepted).
         $this->rateLimiter = new RateLimiterFactory([
             'id' => 'agent_chat',
             'policy' => 'sliding_window',
@@ -57,7 +71,7 @@ final class TurnGuard
             // Symfony limiter intervals are RELATIVE date strings, e.g.
             // '+300 seconds' parses as +300 seconds.
             'interval' => '+'.$config->rateLimitIntervalSec.' seconds',
-        ], new InMemoryStorage());
+        ], new CacheStorage($limiterPool));
     }
 
     /**
@@ -121,6 +135,25 @@ final class TurnGuard
         $billed = $tokens + self::MISSING_USAGE_ESTIMATE;
 
         $this->usage->settleBudget($user, $billed - $reserve, new \DateTimeImmutable());
+    }
+
+    /**
+     * The turn failed with NOTHING that counts as provider work: it died
+     * before the first model call, or the client refused it in flight (no
+     * credentials, so no request was ever sent). Refund the whole estimate
+     * and bill only what COMPLETED provider calls actually reported.
+     *
+     * Unlike reconcileFailedTurn() this never bills the floor: charging a
+     * user ~1000 tokens for a turn that produced no answer and no provider
+     * work lets ~200 retries exhaust a default daily cap of 200 000
+     * (BUGS-TO-FIX F4).
+     *
+     * @param int $reserve the estimate reserveTurn() took
+     * @param int $tokens  actual usage of COMPLETED provider calls (normally 0)
+     */
+    public function refundFailedTurn(User $user, int $reserve, int $tokens = 0): void
+    {
+        $this->usage->settleBudget($user, $tokens - $reserve, new \DateTimeImmutable());
     }
 
     /** TODAY's stored usage (tests, admin queries). */
