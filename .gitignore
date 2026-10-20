@@ -4,7 +4,6 @@
 /.env.local.php
 /.env.*.local
 /.env.dev
-/.env.test
 /config/secrets/prod/prod.decrypt.private.php
 /public/bundles/
 /var/
@@ -38,7 +37,11 @@
 /docker/mosquitto/passwd
 ###< mqtt broker (local dev) ###
 .env.dev
-.env.test
+
+# .env.test is deliberately TRACKED (BUGS-TO-FIX F18): it is the secret-free
+# test contract (KERNEL_CLASS, relaxed rate limits, agent test defaults).
+# Ignoring it made `php bin/phpunit` fail on any fresh clone and on CI with
+# "You must set the KERNEL_CLASS environment variable".
 
 ###> symfony config builder ###
 # Generated on cache warm by Symfony (IDE autocompletion for config(). Initialises

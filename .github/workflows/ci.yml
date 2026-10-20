@@ -51,8 +51,17 @@ jobs:
       - name: Static analysis
         run: php vendor/bin/phpstan analyse --no-progress
 
+      - name: Generate a throwaway JWT key pair (keys are local-only, never committed)
+        env:
+          JWT_PASSPHRASE: ci-only-not-a-secret
+        run: |
+          mkdir -p config/jwt
+          openssl genrsa -aes256 -out config/jwt/private.pem -passout pass:"$JWT_PASSPHRASE" 2048
+          openssl rsa -in config/jwt/private.pem -passin pass:"$JWT_PASSPHRASE" -pubout -out config/jwt/public.pem
+
       - name: Run test suite
         env:
           APP_ENV: test
           DATABASE_URL: 'postgresql://postgres:postgres@127.0.0.1:5432/db_3awedlou?serverVersion=17&charset=utf8'
+          JWT_PASSPHRASE: ci-only-not-a-secret
         run: php bin/phpunit
