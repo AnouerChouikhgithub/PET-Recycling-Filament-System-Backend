@@ -1,0 +1,4 @@
+# Keep line endings consistent: git normalises text to LF in the index and
+# uses the native ending on checkout, so a CRLF-only artifact can never look
+# modified forever (BUGS-TO-FIX F5).
+* text=auto

@@ -86,7 +86,8 @@ final class MqttMessageHandlerTest extends KernelTestCase
         self::assertSame($before + 1, $this->totalTelemetryRows(), 'the sample reached machine_telemetry');
 
         $row = $this->em->getConnection()->fetchAssociative(
-            'SELECT machine_id, temperature, motor_speed FROM machine_telemetry ORDER BY recorded_at DESC LIMIT 1',
+            'SELECT machine_id, temperature, motor_speed FROM machine_telemetry WHERE machine_id = ? ORDER BY recorded_at DESC LIMIT 1',
+            [$machine->getId()->toRfc4122()],
         );
         self::assertIsArray($row);
         self::assertSame($machine->getId()->toRfc4122(), (string) $row['machine_id']);

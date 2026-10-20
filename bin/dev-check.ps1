@@ -54,18 +54,35 @@ Set-Content -Path $tmp2 -Value $code2 -Encoding Ascii
 php $tmp2
 Remove-Item $tmp2 -ErrorAction SilentlyContinue
 
+# Non-zero as soon as anything actionable is found (BUGS-TO-FIX F6).
+$fail = 0
+
 Write-Host ""
 Write-Host "== Migration status =="
 php bin/console doctrine:migrations:up-to-date
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "[FAIL] the dev database is MISSING migrations - those tables do not exist and their routes answer 500:"
+    Write-Host "         php bin/console doctrine:migrations:migrate --no-interaction"
+    Write-Host "       (or: composer db:setup - creates + migrates the dev AND test databases)"
+    $fail = 1
+}
+else { Write-Host "[OK] dev database is migrated to the latest version" }
 
 Write-Host ""
 Write-Host "== doctrine:schema:validate =="
 php bin/console doctrine:schema:validate --skip-sync -q *> $null; $m = $LASTEXITCODE
 php bin/console doctrine:schema:validate --skip-mapping *> $null; $s = $LASTEXITCODE
 if ($m -eq 0 -and $s -eq 0) { Write-Host "[OK] mapping + database schema are in sync" }
-else { Write-Host "[FAIL] schema drift - run: php bin/check-schema --dev && php bin/console doctrine:fixtures:load" }
+else { Write-Host "[FAIL] schema drift - run: php bin/check-schema --dev && php bin/console doctrine:fixtures:load"; $fail = 1 }
 
 Write-Host ""
 Write-Host "== JWT keys present? =="
 if (Test-Path config/jwt/private.pem) { Write-Host "[OK] config/jwt/private.pem exists (values never printed)" }
-else { Write-Host "MISSING: run php bin/console lexik:jwt:generate-keypair" }
+else { Write-Host "MISSING: run php bin/console lexik:jwt:generate-keypair"; $fail = 1 }
+
+Write-Host ""
+if ($fail -ne 0) {
+    Write-Host "RESULT: FAIL - fix the item(s) above before trusting this environment."
+    exit 1
+}
+Write-Host "RESULT: OK"

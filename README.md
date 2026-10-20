@@ -197,10 +197,19 @@ Consumer command: `php bin/console app:mqtt:consume` — full contract in
 ## Migrations
 
 ```bash
+composer db:setup                                   # fresh checkout: create + migrate dev AND test
 php bin/console make:migration                      # generate from entities
 php bin/console doctrine:migrations:migrate         # apply
 php bin/console doctrine:schema:validate            # verify mapping + sync
 ```
+
+`composer db:setup` is the one command a fresh checkout needs: it creates both
+databases and applies every migration. A dev database that is behind on
+migrations is not cosmetic — the routes whose tables are missing answer `500`
+(the AI assistant needs `agent_conversation`, `agent_message` and
+`agent_token_usage`). `bash bin/dev-check` / `.\bin\dev-check.ps1` now exits
+**non-zero** when migrations are pending, the mapping drifted or the JWT keys
+are missing, so CI and humans see a real failure instead of a printed warning.
 
 The initial migration creates: `user`, `machine`, `machine_telemetry`,
 `machine_session`, `filament_production`, `recycling_session`.
@@ -386,6 +395,7 @@ from `CORS_ALLOW_ORIGIN`:
 |---|---|
 | `composer install` | Install dependencies |
 | `php bin/console app:mqtt:consume` | MQTT consumer (telemetry in, commands out) |
+| `composer db:setup` | Create + migrate the dev and test databases (idempotent) |
 | `php bin/console make:migration` | Generate a migration from entities |
 | `php bin/console doctrine:migrations:migrate` | Apply migrations |
 | `php bin/console doctrine:schema:validate` | Verify mapping + sync |
