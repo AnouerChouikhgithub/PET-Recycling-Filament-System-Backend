@@ -129,6 +129,20 @@ final class ToolRegistryLockTest extends KernelTestCase
 
         $evil = $tool->execute(['faultCode' => "bad; rm -rf /"]);
         self::assertFalse($evil['data']['known'], 'charset violations are rejected before any matching');
+
+        $expected = [
+            ['1', 'Sensor fault'],
+            ['2', 'Hard over-temperature'],
+            ['3', 'Heater no-rise'],
+            ['4', 'Thermal runaway'],
+            ['5', 'Cold-extrusion interlock'],
+            ['6', 'Watchdog'],
+        ];
+        foreach ($expected as [$code, $title]) {
+            $result = $tool->execute(['faultCode' => $code]);
+            self::assertTrue($result['data']['known'], 'firmware code '.$code.' is known');
+            self::assertSame($title, $result['data']['title']);
+        }
     }
 
     // ---------------------------------------------------------------- helpers

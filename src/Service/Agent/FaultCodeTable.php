@@ -46,6 +46,36 @@ final class FaultCodeTable
             'meaning' => 'No fresh report has arrived within the offline window; the last state may no longer be valid.',
             'safeUserActions' => ['Check power and the network, then wait until the machine reports again.'],
         ],
+        '1' => [
+            'title' => 'Sensor fault',
+            'meaning' => 'A sensor fault was reported.',
+            'safeUserActions' => [],
+        ],
+        '2' => [
+            'title' => 'Hard over-temperature',
+            'meaning' => 'A hard over-temperature condition was reported.',
+            'safeUserActions' => [],
+        ],
+        '3' => [
+            'title' => 'Heater no-rise',
+            'meaning' => 'The heater failed to reach the expected temperature rise.',
+            'safeUserActions' => [],
+        ],
+        '4' => [
+            'title' => 'Thermal runaway',
+            'meaning' => 'A thermal runaway fault was reported.',
+            'safeUserActions' => [],
+        ],
+        '5' => [
+            'title' => 'Cold-extrusion interlock',
+            'meaning' => 'A cold-extrusion interlock was reported.',
+            'safeUserActions' => [],
+        ],
+        '6' => [
+            'title' => 'Watchdog',
+            'meaning' => 'A watchdog fault was reported.',
+            'safeUserActions' => [],
+        ],
     ];
 
     /**
