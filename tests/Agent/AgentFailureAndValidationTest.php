@@ -6,7 +6,10 @@ namespace App\Tests\Agent;
 
 use App\Entity\AgentMessage;
 use App\Entity\AgentTokenUsage;
+use App\Service\Agent\AgentTool;
+use App\Service\Agent\ToolRegistry;
 use Doctrine\ORM\EntityManagerInterface;
+use Monolog\Handler\TestHandler;
 
 /**
  * Provider-failure lifecycle, tool input validation and result bounding
@@ -45,6 +48,74 @@ final class AgentFailureAndValidationTest extends AgentApiTestCase
         $roles = array_map(fn ($m) => $m['role'] ?? $m->getRole(), $messages);
         self::assertContains('user', $roles);
         self::assertNotContains('assistant', $roles, 'a provider failure never creates an assistant answer');
+    }
+
+    public function testThrowingToolBecomesSafeToolErrorData(): void
+    {
+        $owner = $this->createUser('tool-error', 'tool-error-pass-123');
+        $this->login((string) $owner['email'], (string) $owner['password']);
+
+        $secret = 'secret detail from tool exception';
+        $throwingTool = new class($secret) implements AgentTool {
+            public function __construct(private readonly string $secret)
+            {
+            }
+
+            public function name(): string
+            {
+                return 'list_my_machines';
+            }
+
+            public function description(): string
+            {
+                return 'test tool that throws';
+            }
+
+            public function inputSchema(): array
+            {
+                return ['type' => 'object', 'properties' => [], 'additionalProperties' => false];
+            }
+
+            public function execute(array $input): array
+            {
+                throw new \RuntimeException($this->secret);
+            }
+        };
+
+        $registry = static::getContainer()->get(ToolRegistry::class);
+        $registryProperty = new \ReflectionProperty(ToolRegistry::class, 'tools');
+        $tools = $registryProperty->getValue($registry);
+        $tools['list_my_machines'] = $throwingTool;
+        $registryProperty->setValue($registry, $tools);
+
+        $logger = static::getContainer()->get('monolog.logger.agent');
+        $handler = new TestHandler();
+        $logger->pushHandler($handler);
+
+        $this->stub()->addResponse([['type' => 'tool_use', 'id' => 'throwing-tool', 'name' => 'list_my_machines', 'input' => []]]);
+        $this->stub()->addResponse([['type' => 'text', 'text' => 'I could not complete that lookup.']]);
+
+        try {
+            $this->client->request('POST', '/api/agent/chat', [], [], ['CONTENT_TYPE' => 'application/json'], (string) json_encode(['message' => 'list my machines']));
+            self::assertResponseStatusCodeSame(200);
+
+            $body = (string) $this->client->getResponse()->getContent();
+            $received = (string) json_encode($this->stub()->receivedMessages);
+            $persistedRows = $this->em->getConnection()->fetchAllAssociative('SELECT content FROM agent_message');
+            $persisted = (string) json_encode($persistedRows);
+            self::assertStringContainsString('TOOL_ERROR', $received);
+            self::assertStringNotContainsString($secret, $received.$persisted.$body);
+
+            $records = $handler->getRecords();
+            $failureRecords = array_values(array_filter($records, static fn ($record): bool => 'agent.tool_failed' === $record['message']));
+            self::assertCount(1, $failureRecords);
+            self::assertSame([
+                'tool' => 'list_my_machines',
+                'exception_class' => \RuntimeException::class,
+            ], $failureRecords[0]['context']);
+        } finally {
+            $logger->popHandler();
+        }
     }
 
     public function testMissingProviderUsageIsBilledTheConservativeFloor(): void

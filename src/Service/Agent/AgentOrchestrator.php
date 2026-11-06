@@ -305,7 +305,16 @@ final class AgentOrchestrator
             return ['ok' => false, 'code' => 'VALIDATION_FAILED', 'reasons' => $errors];
         }
 
-        return $tool->execute($input);
+        try {
+            return $tool->execute($input);
+        } catch (\Throwable $exception) {
+            $this->agentLogger->warning('agent.tool_failed', [
+                'tool' => $toolName,
+                'exception_class' => $exception::class,
+            ]);
+
+            return ['ok' => false, 'code' => 'TOOL_ERROR'];
+        }
     }
 
     /**
