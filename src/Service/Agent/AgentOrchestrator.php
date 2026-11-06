@@ -390,7 +390,7 @@ final class AgentOrchestrator
         }
 
         $data = $result['data'] ?? null;
-        if (\is_array($data)) {
+        if (\is_array($data) && array_is_list($data)) {
             return $toolName.': '.\count($data).' row(s)';
         }
 

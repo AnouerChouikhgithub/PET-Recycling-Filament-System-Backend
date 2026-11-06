@@ -121,6 +121,33 @@ final class AgentFailureAndValidationTest extends AgentApiTestCase
         self::assertSame($fallback, $persisted);
     }
 
+    public function testToolSummariesCountListsButNotAssociativeObjects(): void
+    {
+        $owner = $this->createUser('summary-shapes', 'summary-shapes-pass-123');
+        static::getContainer()->get(TokenStorageInterface::class)->setToken(
+            new UsernamePasswordToken($owner['user'], 'main', $owner['user']->getRoles()),
+        );
+        $stub = $this->stub();
+        $stub->reset();
+        $controller = static::getContainer()->get(AgentController::class);
+        $controllerOrchestrator = (new ReflectionProperty(AgentController::class, 'orchestrator'))->getValue($controller);
+        self::assertSame($stub, (new ReflectionProperty(AgentOrchestrator::class, 'llm'))->getValue($controllerOrchestrator));
+        $stub->addResponse([
+            ['type' => 'tool_use', 'id' => 'list-shape', 'name' => 'list_my_machines', 'input' => []],
+            ['type' => 'tool_use', 'id' => 'object-shape', 'name' => 'explain_fault_code', 'input' => ['faultCode' => 'unknown-code']],
+        ]);
+        $stub->addResponse([['type' => 'text', 'text' => 'Summaries prepared.']]);
+
+        $request = Request::create('/api/agent/chat', 'POST', [], [], [], ['CONTENT_TYPE' => 'application/json'], (string) json_encode(['message' => 'summarize results']));
+        $response = $controller->chat($request);
+        self::assertSame(200, $response->getStatusCode());
+        $body = json_decode((string) $response->getContent(), true);
+        self::assertSame([
+            ['name' => 'list_my_machines', 'summary' => 'list_my_machines: 0 row(s)'],
+            ['name' => 'explain_fault_code', 'summary' => 'explain_fault_code: ok'],
+        ], $body['data']['message']['toolCalls']);
+    }
+
     public function testMultipleToolUsesProduceOrderedResultsInOneFollowUpMessage(): void
     {
         $owner = $this->createUser('multi-tool', 'multi-tool-pass-123');
