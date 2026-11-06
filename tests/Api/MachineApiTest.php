@@ -147,6 +147,30 @@ final class MachineApiTest extends WebTestCase
         self::assertSame(192.0, $body['data'][0]['temperature']);
     }
 
+    public function testTelemetryHistoryRejectsMalformedSinceAndFiltersValidSince(): void
+    {
+        $machine = $this->createMachine('Since Unit', 'since-unit-' . substr(Uuid::v7()->toBase32(), 0, 8));
+        $this->addTelemetry($machine, 191.0);
+        $this->addTelemetry($machine, 192.0);
+        $this->login();
+        $url = '/api/machines/' . $machine->getId()->toRfc4122() . '/telemetry';
+
+        $this->client->request('GET', $url . '?since=not-a-date');
+
+        self::assertResponseStatusCodeSame(422, 'a malformed since value is a client validation error, never a 500');
+        $body = $this->json();
+        self::assertSame('VALIDATION_FAILED', $body['error']['code']);
+        self::assertArrayHasKey('since', $body['error']['details']);
+
+        $this->client->request('GET', $url . '?since=2000-01-01T00:00:00%2B00:00');
+        self::assertResponseIsSuccessful();
+        self::assertCount(2, $this->json()['data']);
+
+        $this->client->request('GET', $url . '?since=2099-01-01T00:00:00Z');
+        self::assertResponseIsSuccessful();
+        self::assertCount(0, $this->json()['data'], 'a future since must filter every existing sample');
+    }
+
     public function testSessionsEndpointFiltersByStatus(): void
     {
         $machine = $this->createMachine('Session Unit', 'session-unit-' . substr(Uuid::v7()->toBase32(), 0, 8));
