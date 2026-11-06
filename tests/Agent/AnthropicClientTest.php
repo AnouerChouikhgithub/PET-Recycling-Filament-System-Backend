@@ -90,6 +90,25 @@ final class AnthropicClientTest extends TestCase
         self::assertSame('object', $body['tools'][0]['input_schema']['type']);
     }
 
+    public function testConsecutiveUserMessagesMergeIntoOneProviderTurn(): void
+    {
+        $client = $this->client([$this->textMessage('ok')]);
+        $messages = [
+            ['role' => 'user', 'content' => [['type' => 'text', 'text' => 'first persisted user turn']]],
+            ['role' => 'user', 'content' => [['type' => 'text', 'text' => 'retry after provider failure']]],
+        ];
+
+        $client->complete($messages, $this->tools());
+        $wire = $this->bodyOf($this->requests[0])['messages'];
+
+        self::assertCount(1, $wire);
+        self::assertSame('user', $wire[0]['role']);
+        self::assertSame([
+            ['type' => 'text', 'text' => 'first persisted user turn'],
+            ['type' => 'text', 'text' => 'retry after provider failure'],
+        ], $wire[0]['content']);
+    }
+
     public function testFailedToolResultIsMarkedAsErrorData(): void
     {
         $client = $this->client([$this->textMessage('ok')]);

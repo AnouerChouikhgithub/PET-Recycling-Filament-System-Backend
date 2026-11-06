@@ -282,10 +282,17 @@ final class AnthropicClient implements LlmClientInterface
                 continue;
             }
 
-            $wire[] = [
-                'role' => 'user' === $role ? 'user' : 'assistant',
-                'content' => $this->wireBlocks($content),
-            ];
+            $wireRole = 'user' === $role ? 'user' : 'assistant';
+            $wireBlocks = $this->wireBlocks($content);
+            $last = \count($wire) - 1;
+            if ([] !== $wire && $wire[$last]['role'] === $wireRole) {
+                array_push($wire[$last]['content'], ...$wireBlocks);
+            } else {
+                $wire[] = [
+                    'role' => $wireRole,
+                    'content' => $wireBlocks,
+                ];
+            }
         }
 
         return $wire;
