@@ -4,21 +4,17 @@ declare(strict_types=1);
 
 namespace App\Service\Agent\Tools;
 
-use App\Entity\User;
-use App\Repository\MachineRepository;
 use App\Service\Agent\AgentTool;
-use Symfony\Component\Security\Core\Authentication\Token\Storage\TokenStorageInterface;
+use App\Service\Machine\MachineQueryService;
 
 /**
- * OWNER-SCOPED list: only machines the CURRENT user owns. DECIDED (session
- * 1): admin users get NO agent-wide view - MachineAccess::visibleMachines()
- * is deliberately NOT used here because it returns everything for admins.
+ * OWNER-SCOPED list: only machines the CURRENT user owns. The strict query
+ * avoids the REST API admin bypass in MachineAccess.
  */
 final class ListMyMachinesTool implements AgentTool
 {
     public function __construct(
-        private readonly MachineRepository $machines,
-        private readonly TokenStorageInterface $tokenStorage,
+        private readonly MachineQueryService $queryService,
     ) {
     }
 
@@ -48,46 +44,26 @@ final class ListMyMachinesTool implements AgentTool
 
     public function execute(array $input): array
     {
-        $user = $this->currentUser();
-        if (null === $user) {
-            return ['ok' => false, 'code' => 'UNAUTHORIZED'];
-        }
-
-        $qb = $this->machines->createQueryBuilder('m')
-            ->select('m.id', 'm.name', 'm.identifier', 'm.status', 'm.lastSeenAt')
-            ->where('m.owner = :owner')
-            ->setParameter('owner', $user)
-            ->orderBy('m.createdAt', 'ASC');
-
-        // Optional user-selected filter. Only known values pass; anything
-        // else is ignored (never interpolated).
+        $machines = $this->queryService->listMachinesStrict();
         $status = $input['status'] ?? null;
-        if (\is_string($status) && '' !== $status && 'offline' !== $status) {
-            $qb->andWhere($qb->expr()->eq('m.status', ':st'))->setParameter('st', $status);
-        }
-
-        $rows = $qb->getQuery()->getArrayResult();
 
         $data = [];
-        foreach ($rows as $row) {
-            $lastSeen = $row['lastSeenAt'];
+        foreach ($machines as $machine) {
+            if (\is_string($status) && '' !== $status && 'offline' !== $status && $machine->getStatus()->value !== $status) {
+                continue;
+            }
+
+            $lastSeen = $machine->getLastSeenAt();
             $data[] = [
-                'id' => $row['id'] instanceof \Stringable ? (string) $row['id'] : $row['id'],
-                'name' => $row['name'],
-                'identifier' => $row['identifier'],
-                'status' => $row['status'],
+                'id' => $machine->getId()->toRfc4122(),
+                'name' => $machine->getName(),
+                'identifier' => $machine->getIdentifier(),
+                'status' => $machine->getStatus()->value,
                 'lastSeenAt' => null !== $lastSeen ? $lastSeen->format(\DateTimeInterface::ATOM) : null,
                 'secondsSinceLastSeen' => null !== $lastSeen ? max(0, time() - $lastSeen->getTimestamp()) : null,
             ];
         }
 
         return ['ok' => true, 'data' => $data];
-    }
-
-    private function currentUser(): ?User
-    {
-        $user = $this->tokenStorage->getToken()?->getUser();
-
-        return $user instanceof User ? $user : null;
     }
 }

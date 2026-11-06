@@ -43,11 +43,31 @@ final class MachineQueryService
     }
 
     /**
+     * Machines strictly owned by the current user, without the REST admin bypass.
+     *
+     * @return list<Machine>
+     */
+    public function listMachinesStrict(): array
+    {
+        return $this->access->strictlyOwnedMachines();
+    }
+
+    /**
      * @throws ResourceNotFoundException unknown id OR not owned (same 404)
      */
     public function getMachine(string $id): Machine
     {
         return $this->access->getOwnedMachine($id);
+    }
+
+    /**
+     * Strict owner-only variant for agent tools; never grants an admin bypass.
+     *
+     * @throws ResourceNotFoundException unknown id OR not owned (same 404)
+     */
+    public function getMachineStrict(string $id): Machine
+    {
+        return $this->access->getStrictlyOwnedMachine($id);
     }
 
     /**

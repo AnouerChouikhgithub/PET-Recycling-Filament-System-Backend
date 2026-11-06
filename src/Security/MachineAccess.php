@@ -95,6 +95,36 @@ final class MachineAccess
     }
 
     /**
+     * Machines owned by the current user, without the REST API admin bypass.
+     *
+     * @return list<Machine>
+     */
+    public function strictlyOwnedMachines(): array
+    {
+        $user = $this->currentUser();
+
+        return null === $user ? [] : $this->machines->findByOwner($user);
+    }
+
+    /**
+     * The machine with this id IF the current user owns it, without the REST
+     * API admin bypass. Unknown and foreign ids share the same 404.
+     *
+     * @throws ResourceNotFoundException
+     */
+    public function getStrictlyOwnedMachine(string $id): Machine
+    {
+        $user = $this->currentUser();
+        $machine = $this->machines->find($id);
+
+        if (null === $machine || null === $user || true !== $machine->getOwner()?->getId()->equals($user->getId())) {
+            throw new ResourceNotFoundException('Machine not found.', 'MACHINE_NOT_FOUND');
+        }
+
+        return $machine;
+    }
+
+    /**
      * The machine with this id IF the current user may see it, otherwise the
      * same "Machine not found." error an unknown id produces.
      *

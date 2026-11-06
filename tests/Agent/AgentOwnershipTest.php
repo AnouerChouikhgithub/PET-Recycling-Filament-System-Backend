@@ -8,7 +8,11 @@ use App\Entity\AgentConversation;
 use App\Entity\AgentMessage;
 use App\Entity\Machine;
 use App\Entity\MachineStatus;
+use App\Api\Exception\ResourceNotFoundException;
+use App\Security\MachineAccess;
 use Doctrine\ORM\EntityManagerInterface;
+use Symfony\Component\Security\Core\Authentication\Token\Storage\TokenStorageInterface;
+use Symfony\Component\Security\Core\Authentication\Token\UsernamePasswordToken;
 
 /**
  * Ownership isolation of the agent surface (docs/ai-agent-test-plan.md T1).
@@ -16,6 +20,20 @@ use Doctrine\ORM\EntityManagerInterface;
  */
 final class AgentOwnershipTest extends AgentApiTestCase
 {
+    public function testAgentToolsNeverUseNonStrictMachineAccessors(): void
+    {
+        $files = glob(\dirname(__DIR__, 2).'/src/Service/Agent/Tools/*.php') ?: [];
+        self::assertCount(5, $files, 'expected exactly the five tool classes');
+
+        foreach ($files as $file) {
+            self::assertDoesNotMatchRegularExpression(
+                '/->(getMachine|listMachines|getMachineForIngest|getOwnedMachine|visibleMachines)\(/',
+                (string) file_get_contents($file),
+                basename($file).' calls a non-strict machine accessor',
+            );
+        }
+    }
+
     public function testListMyMachinesReturnsOnlyOwnedMachines(): void
     {
         $owner = $this->createUser('own1', 'own-pass-123');
@@ -57,23 +75,60 @@ final class AgentOwnershipTest extends AgentApiTestCase
         self::assertStringContainsString('MACHINE_NOT_FOUND', $received, 'the model must receive the same-envelope refusal as an unknown id');
     }
 
-    public function testAdminSeesOnlyOwnedMachinesThroughAgent(): void
+    public function testAgentChatWithoutTokenReturns401(): void
+    {
+        $this->client->request('POST', '/api/agent/chat', [], [], ['CONTENT_TYPE' => 'application/json'], (string) json_encode(['message' => 'list']));
+
+        self::assertResponseStatusCodeSame(401);
+    }
+
+    public function testAdminTokenCannotUseAgentChat(): void
     {
         $admin = $this->createUser('adm1', 'adm-pass-123', true);
-        $other = $this->createUser('other3', 'other-pass-123');
-        $adm = $this->createMachine('Admin Own', 'adm-'.substr($this->suffix, 0, 8), $admin['user']);
-        $foreign = $this->createMachine('Admin Foreign', 'adf-'.substr($this->suffix, 0, 8), $other['user']);
-
         $this->login((string) $admin['email'], (string) $admin['password']);
-        $this->stub()->addResponse([['type' => 'tool_use', 'id' => 't1', 'name' => 'list_my_machines', 'input' => []]]);
-        $this->stub()->addResponse([['type' => 'text', 'text' => 'list done']]);
 
         $this->client->request('POST', '/api/agent/chat', [], [], ['CONTENT_TYPE' => 'application/json'], (string) json_encode(['message' => 'list']));
-        self::assertResponseStatusCodeSame(200);
 
-        $received = (string) json_encode($this->stub()->receivedMessages);
-        self::assertStringContainsString((string) $adm->getId()->toRfc4122(), $received);
-        self::assertStringNotContainsString((string) $foreign->getId()->toRfc4122(), $received, 'T1.6 DECIDED: admins get NO agent-wide view');
+        self::assertResponseStatusCodeSame(404);
+        self::assertSame('AGENT_DISABLED', $this->json()['error']['message']);
+        self::assertSame(0, $this->stub()->calls);
+    }
+
+    public function testStrictMachineAccessRejectsOtherOwnersMachineForAdmin(): void
+    {
+        $admin = $this->createUser('adm2', 'adm-pass-123', true);
+        $other = $this->createUser('other3', 'other-pass-123');
+        $foreign = $this->createMachine('Admin Foreign', 'adf-'.substr($this->suffix, 0, 8), $other['user']);
+        static::getContainer()->get(TokenStorageInterface::class)->setToken(
+            new UsernamePasswordToken($admin['user'], 'main', $admin['user']->getRoles()),
+        );
+
+        self::assertSame(
+            $foreign,
+            static::getContainer()->get(MachineAccess::class)->getOwnedMachine($foreign->getId()->toRfc4122()),
+            'The ordinary REST access method retains its admin bypass.',
+        );
+
+        try {
+            static::getContainer()->get(MachineAccess::class)->getStrictlyOwnedMachine($foreign->getId()->toRfc4122());
+            self::fail('Strict access must reject an administrator reading another owner\'s machine.');
+        } catch (ResourceNotFoundException $exception) {
+            self::assertSame('MACHINE_NOT_FOUND', $exception->errorCode);
+        }
+    }
+
+    public function testStrictMachineAccessAllowsOwnerToReadOwnMachine(): void
+    {
+        $owner = $this->createUser('strict-owner', 'owner-pass-123');
+        $machine = $this->createMachine('Owned machine', 'str-'.substr($this->suffix, 0, 8), $owner['user']);
+        static::getContainer()->get(TokenStorageInterface::class)->setToken(
+            new UsernamePasswordToken($owner['user'], 'main', $owner['user']->getRoles()),
+        );
+
+        self::assertSame(
+            $machine,
+            static::getContainer()->get(MachineAccess::class)->getStrictlyOwnedMachine($machine->getId()->toRfc4122()),
+        );
     }
 
     public function testForeignConversationIs404AndPersistsNothing(): void

@@ -59,7 +59,7 @@ final class GetLatestTelemetryTool implements AgentTool
         // Ownership gate FIRST - throws ResourceNotFoundException for
         // unknown OR not-owned ids (same envelope, no enumeration).
         try {
-            $machine = $this->queryService->getMachine($machineId);
+            $machine = $this->queryService->getMachineStrict($machineId);
         } catch (\Throwable) {
             return ['ok' => false, 'code' => 'MACHINE_NOT_FOUND'];
         }

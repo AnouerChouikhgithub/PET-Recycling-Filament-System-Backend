@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Service\Agent\Tools;
 
+use App\Api\Exception\ResourceNotFoundException;
 use App\Entity\MachineCommandAudit;
 use App\Repository\MachineCommandAuditRepository;
 use App\Service\Agent\AgentTool;
@@ -58,8 +59,8 @@ final class GetRecentEventsTool implements AgentTool
         $limit = max(1, min(20, $limit));
 
         try {
-            $machine = $this->queryService->getMachine($machineId);
-        } catch (\Throwable) {
+            $machine = $this->queryService->getMachineStrict($machineId);
+        } catch (ResourceNotFoundException) {
             return ['ok' => false, 'code' => 'MACHINE_NOT_FOUND'];
         }
 

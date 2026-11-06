@@ -149,7 +149,7 @@ final class AgentController
     private function requireUser(): User
     {
         $user = $this->tokenStorage->getToken()?->getUser();
-        if (!$user instanceof User) {
+        if (!$user instanceof User || \in_array('ROLE_ADMIN', $user->getRoles(), true)) {
             throw new NotFoundHttpException('AGENT_DISABLED');
         }
 
