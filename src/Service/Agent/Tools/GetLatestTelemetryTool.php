@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Service\Agent\Tools;
 
+use App\Api\Exception\ResourceNotFoundException;
 use App\Service\Agent\AgentTool;
 use App\Service\Machine\MachineQueryService;
 use Symfony\Component\Uid\Uuid;
@@ -61,7 +62,7 @@ final class GetLatestTelemetryTool implements AgentTool
         // unknown OR not-owned ids (same envelope, no enumeration).
         try {
             $machine = $this->queryService->getMachineStrict($machineId);
-        } catch (\Throwable) {
+        } catch (ResourceNotFoundException) {
             return ['ok' => false, 'code' => 'MACHINE_NOT_FOUND'];
         }
 
@@ -80,11 +81,13 @@ final class GetLatestTelemetryTool implements AgentTool
 
         return ['ok' => true, 'data' => [
             'machineId' => $machineId,
-            'temperature' => $telemetry->getTemperature(),
-            'targetTemperature' => $telemetry->getTargetTemperature(),
-            'heaterState' => $telemetry->getHeaterState(),
-            'motorState' => $telemetry->getMotorState(),
-            'motorSpeed' => $telemetry->getMotorSpeed(),
+            'temperature' => $telemetry->getTemperature() ?? $notReported,
+            'targetTemperature' => $telemetry->getTargetTemperature() ?? $notReported,
+            'heaterState' => $telemetry->getHeaterState() ?? $notReported,
+            'motorState' => $telemetry->getMotorState() ?? $notReported,
+            'motorSpeed' => $telemetry->getMotorSpeed() ?? $notReported,
+            'units' => ['temperature' => 'C', 'targetTemperature' => 'C'],
+            'motorSpeedUnit' => 'unverified (firmware label unresolved)',
             // fanState/filamentSpeed/filamentDiameter/energyConsumption have no
             // hardware source today - null must NEVER reach the model as 0/false.
             'fanState' => $telemetry->getFanState() ?? $notReported,
