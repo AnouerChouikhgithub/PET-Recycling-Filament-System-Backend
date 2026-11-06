@@ -7,6 +7,7 @@ namespace App\Service\Agent;
 use App\Api\Exception\AgentDailyTokenCapException;
 use App\Api\Exception\AgentLlmNotAttemptedException;
 use App\Api\Exception\AgentLlmUnavailableException;
+use App\Api\Exception\ReconciledLlmFailure;
 use App\Api\Exception\ResourceNotFoundException;
 use App\Entity\AgentConversation;
 use App\Entity\AgentMessage;
@@ -15,14 +16,6 @@ use App\Repository\AgentConversationRepository;
 use App\Repository\AgentMessageRepository;
 use Doctrine\ORM\EntityManagerInterface;
 use Psr\Log\LoggerInterface;
-
-/**
- * Internal marker: the model call already reconciled the reservation in
- * modelCall(); the outer catch must not bill twice.
- */
-final class ReconciledLlmFailure extends AgentLlmUnavailableException
-{
-}
 
 /**
  * One chat turn:
