@@ -33,7 +33,7 @@ final class DeviceTokenRepository extends ServiceEntityRepository
             ->getQuery()
             ->getOneOrNullResult();
 
-        return (null !== $token && !$token->isRevoked()) ? $token : null;
+        return (null !== $token && !$token->isRevoked() && $token->getMachine()->isDeviceTokensEnabled()) ? $token : null;
     }
 
     /** Revoke every token of a machine (device wipe / security incident). */
