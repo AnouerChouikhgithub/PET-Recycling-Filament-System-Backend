@@ -97,7 +97,7 @@ All channels are nullable — a sample may carry any subset.
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
-| GET | `/api/machines/{id}/telemetry?limit=&offset=&since=` | JWT | History, newest first (limit ≤ 1000) |
+| GET | `/api/machines/{id}/telemetry?limit=&offset=&since=` | JWT | History, newest first (limit ≤ 200; `since` is ISO-8601, malformed → 422) |
 | POST | `/api/machines/{id}/telemetry` | JWT | Ingest one sample → 201 |
 
 ### Ingestion (POST) — used by the ESP32/IoT layer
@@ -239,7 +239,9 @@ No secrets ever live in the frontends; `.env` files are git-ignored,
 
 All agent routes live in the `api` firewall (user JWT). When
 `AGENT_ENABLED=false` every route answers `404 AGENT_DISABLED`. The
-assistant only ever sees machines the requester OWNS (admins included).
+assistant only ever sees machines the requester OWNS: the agent is
+**owner-only**, there is no admin bypass, and an admin token gets the same
+`404 AGENT_DISABLED` as a disabled surface.
 
 Env vars (placeholders only in tracked files; the real
 `ANTHROPIC_API_KEY` lives in untracked `.env.local` / process env):
@@ -274,8 +276,11 @@ Errors (standard envelope):
 - `404 AGENT_NOT_FOUND` - unknown, foreign, or soft-deleted conversationId
 - `429 AGENT_RATE_LIMITED` (Retry-After) - 20 messages / 5 min per USER
 - `429 AGENT_DAILY_TOKEN_CAP` (Retry-After) - per-user per-UTC-day cap
-  enforced by an atomic reserve before the LLM call; failed turns bill a
-  conservative 1000-token floor so accounting cannot be bypassed
+  enforced by an atomic reserve before the LLM call; `Retry-After` is the
+  number of seconds until 00:00 UTC. A failure after a provider attempt is
+  billed the conservative 1000-token floor so accounting cannot be bypassed;
+  a refusal before any request is made (unusable/missing credentials) is
+  refunded in full
 - `503 AGENT_LLM_UNAVAILABLE` - provider failure/config/timeout; provider
   details stay server-side (metadata-only agent log channel)
 
