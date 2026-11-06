@@ -447,7 +447,7 @@ final class ThrowingHttpClient implements HttpClientInterface
         return new MockResponse('{}');
     }
 
-    public function stream($responses, float $timeout = null): ResponseStreamInterface
+    public function stream($responses, ?float $timeout = null): ResponseStreamInterface
     {
         throw new \LogicException('not used');
     }
