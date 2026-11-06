@@ -57,6 +57,32 @@ final class AgentFailureAndValidationTest extends AgentApiTestCase
         self::assertNotContains('assistant', $roles, 'a provider failure never creates an assistant answer');
     }
 
+    public function testMultipleToolUsesProduceOrderedResultsInOneFollowUpMessage(): void
+    {
+        $owner = $this->createUser('multi-tool', 'multi-tool-pass-123');
+        $machine = $this->createMachine('Multi tool machine', 'mt-'.substr($this->suffix, 0, 8), $owner['user']);
+        $this->login((string) $owner['email'], (string) $owner['password']);
+
+        $this->stub()->addResponse([
+            ['type' => 'tool_use', 'id' => 'tool-list', 'name' => 'list_my_machines', 'input' => []],
+            ['type' => 'tool_use', 'id' => 'tool-fault', 'name' => 'explain_fault_code', 'input' => ['faultCode' => 'unknown-code']],
+        ]);
+        $this->stub()->addResponse([['type' => 'text', 'text' => 'Both lookups completed.']]);
+
+        $this->client->request('POST', '/api/agent/chat', [], [], ['CONTENT_TYPE' => 'application/json'], (string) json_encode(['message' => 'check machines and code']));
+
+        self::assertResponseStatusCodeSame(200);
+        self::assertSame(2, $this->stub()->calls);
+        $received = $this->stub()->receivedMessages;
+        $toolResultMessages = array_values(array_filter($received, static fn (array $message): bool => 'tool_result' === ($message['role'] ?? null)));
+        self::assertCount(1, $toolResultMessages);
+        self::assertCount(2, $toolResultMessages[0]['content']);
+        self::assertSame('tool-list', $toolResultMessages[0]['content'][0]['tool_use_id']);
+        self::assertSame('tool-fault', $toolResultMessages[0]['content'][1]['tool_use_id']);
+        self::assertStringContainsString((string) $machine->getId()->toRfc4122(), (string) json_encode($toolResultMessages[0]['content'][0]['content']));
+        self::assertSame('explain_fault_code', $toolResultMessages[0]['content'][1]['name']);
+    }
+
     public function testAuditLogRejectsInvalidMachineIdBeforeQuery(): void
     {
         $owner = $this->createUser('audit-invalid', 'audit-pass-123');

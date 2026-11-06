@@ -152,61 +152,63 @@ final class AgentOrchestrator
         while (true) {
             $response = $this->modelCall($llmMessages, $this->registry->definitions(), $usageTotal, $user, $reserve);
 
-            $toolUse = null;
+            $toolUses = [];
             $textOut = '';
             foreach ($response['content'] as $block) {
                 if ('text' === ($block['type'] ?? null)) {
                     $textOut .= (string) ($block['text'] ?? '');
                 } elseif ('tool_use' === ($block['type'] ?? null)) {
-                    $toolUse = $block;
+                    $toolUses[] = $block;
                 }
             }
 
-            if (null === $toolUse) {
+            if ([] === $toolUses) {
                 $answer = $textOut;
                 $llmMessages[] = ['role' => 'assistant', 'content' => $response['content']];
                 break;
-            }
-
-            ++$rounds;
-            if ($rounds > $this->config->maxToolRounds) {
-                // Round cap: force a text answer from what is known. The
-                // tool call is NEVER executed beyond the budget.
-                $answer = $textOut;
-                $llmMessages[] = ['role' => 'assistant', 'content' => $response['content']];
-                break;
-            }
-
-            $toolName = (string) ($toolUse['name'] ?? '');
-            $toolUseId = (string) ($toolUse['id'] ?? '');
-            if ('' === $toolUseId) {
-                // Never crash the loop on a provider id gap: refuse as DATA.
-                $toolUseId = 'malformed';
             }
 
             $llmMessages[] = ['role' => 'assistant', 'content' => $response['content']];
+            $resultBlocks = [];
 
-            if (!$this->registry->has($toolName)) {
-                // Unknown tool: report back as DATA, never execute (T2.2).
-                $result = ['ok' => false, 'code' => 'UNKNOWN_TOOL'];
-                $toolCalls[] = ['name' => $toolName, 'summary' => 'unknown tool refused'];
-            } else {
-                $result = $this->runTool($toolName, \is_array($toolUse['input'] ?? null) ? $toolUse['input'] : []);
-                $toolCalls[] = ['name' => $toolName, 'summary' => $this->summarize($toolName, $result)];
+            foreach ($toolUses as $toolUse) {
+                ++$rounds;
+                $toolName = (string) ($toolUse['name'] ?? '');
+                $toolUseId = (string) ($toolUse['id'] ?? '');
+                if ('' === $toolUseId) {
+                    // Never crash the loop on a provider id gap: refuse as DATA.
+                    $toolUseId = 'malformed';
+                }
+
+                if ($rounds > $this->config->maxToolRounds) {
+                    // Every provider call still gets a result, but calls beyond
+                    // the budget are never executed.
+                    $result = ['ok' => false, 'code' => 'TOOL_ROUND_LIMIT'];
+                    $summary = 'tool round limit reached';
+                } elseif (!$this->registry->has($toolName)) {
+                    // Unknown tool: report back as DATA, never execute (T2.2).
+                    $result = ['ok' => false, 'code' => 'UNKNOWN_TOOL'];
+                    $summary = 'unknown tool refused';
+                } else {
+                    $result = $this->runTool($toolName, \is_array($toolUse['input'] ?? null) ? $toolUse['input'] : []);
+                    $summary = $this->summarize($toolName, $result);
+                }
+
+                $result = $this->clampResult($result);
+                $toolCalls[] = ['name' => $toolName, 'summary' => $summary];
+                $toolResults[] = $result;
+                $resultBlocks[] = ['id' => $toolUseId, 'name' => $toolName, 'result' => $result];
+
+                $this->agentLogger->info('agent.tool', [
+                    'user_id' => $user->getId()->toRfc4122(),
+                    'conversation_id' => $conversation->getId()->toRfc4122(),
+                    'tool' => $toolName,
+                    'round' => $rounds,
+                    'ok' => (bool) ($result['ok'] ?? false),
+                ]);
             }
 
-            $result = $this->clampResult($result);
-            $toolResults[] = $result;
-
-            $this->agentLogger->info('agent.tool', [
-                'user_id' => $user->getId()->toRfc4122(),
-                'conversation_id' => $conversation->getId()->toRfc4122(),
-                'tool' => $toolName,
-                'round' => $rounds,
-                'ok' => (bool) ($result['ok'] ?? false),
-            ]);
-
-            $llmMessages[] = MessagesContentNormalizer::toolResult($toolUseId, $toolName, $result);
+            $llmMessages[] = MessagesContentNormalizer::toolResults($resultBlocks);
         }
 
         // Assistant message + REAL usage settle commit atomically: the client
