@@ -163,6 +163,7 @@ final class AgentOrchestrator
 
             $llmMessages[] = ['role' => 'assistant', 'content' => $response['content']];
             $resultBlocks = [];
+            $toolRoundLimitReached = false;
 
             foreach ($toolUses as $toolUse) {
                 ++$rounds;
@@ -176,6 +177,7 @@ final class AgentOrchestrator
                 if ($rounds > $this->config->maxToolRounds) {
                     // Every provider call still gets a result, but calls beyond
                     // the budget are never executed.
+                    $toolRoundLimitReached = true;
                     $result = ['ok' => false, 'code' => 'TOOL_ROUND_LIMIT'];
                     $summary = 'tool round limit reached';
                 } elseif (!$this->registry->has($toolName)) {
@@ -202,6 +204,14 @@ final class AgentOrchestrator
             }
 
             $llmMessages[] = MessagesContentNormalizer::toolResults($resultBlocks);
+            if ($toolRoundLimitReached) {
+                $answer = $textOut;
+                break;
+            }
+        }
+
+        if ('' === $answer) {
+            $answer = "I couldn't complete that lookup. Please try again.";
         }
 
         // Assistant message + REAL usage settle commit atomically: the client

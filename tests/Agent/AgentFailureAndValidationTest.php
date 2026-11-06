@@ -4,10 +4,12 @@ declare(strict_types=1);
 
 namespace App\Tests\Agent;
 
+use App\Controller\Api\AgentController;
 use App\Entity\AgentMessage;
 use App\Entity\AgentTokenUsage;
 use App\Entity\MachineCommandAudit;
 use App\Entity\MachineCommandType;
+use App\Service\Agent\AgentOrchestrator;
 use App\Service\Agent\AgentTool;
 use App\Service\Agent\Tools\GetAuditLogTool;
 use App\Service\Agent\Tools\GetLatestTelemetryTool;
@@ -15,9 +17,10 @@ use App\Service\Agent\Tools\GetRecentEventsTool;
 use App\Service\Agent\ToolRegistry;
 use Doctrine\ORM\EntityManagerInterface;
 use Monolog\Handler\TestHandler;
+use ReflectionProperty;
+use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\Security\Core\Authentication\Token\Storage\TokenStorageInterface;
 use Symfony\Component\Security\Core\Authentication\Token\UsernamePasswordToken;
-
 /**
  * Provider-failure lifecycle, tool input validation and result bounding
  * (session 2 phases B/C/E/F): the scripted stub drives with
@@ -55,6 +58,67 @@ final class AgentFailureAndValidationTest extends AgentApiTestCase
         $roles = array_map(fn ($m) => $m['role'] ?? $m->getRole(), $messages);
         self::assertContains('user', $roles);
         self::assertNotContains('assistant', $roles, 'a provider failure never creates an assistant answer');
+    }
+
+    public function testEmptyModelAnswerUsesAndPersistsFallback(): void
+    {
+        $owner = $this->createUser('empty-answer', 'empty-answer-pass-123');
+        static::getContainer()->get(TokenStorageInterface::class)->setToken(
+            new UsernamePasswordToken($owner['user'], 'main', $owner['user']->getRoles()),
+        );
+        $stub = $this->stub();
+        $stub->reset();
+        $controller = static::getContainer()->get(AgentController::class);
+        $controllerOrchestrator = (new ReflectionProperty(AgentController::class, 'orchestrator'))->getValue($controller);
+        self::assertSame($stub, (new ReflectionProperty(AgentOrchestrator::class, 'llm'))->getValue($controllerOrchestrator));
+        $stub->addResponse([['type' => 'text', 'text' => '']]);
+
+        $request = Request::create('/api/agent/chat', 'POST', [], [], [], ['CONTENT_TYPE' => 'application/json'], (string) json_encode(['message' => 'empty answer']));
+        $response = $controller->chat($request);
+
+        self::assertSame(200, $response->getStatusCode());
+        self::assertSame(1, $stub->calls);
+        $fallback = "I couldn't complete that lookup. Please try again.";
+        $body = json_decode((string) $response->getContent(), true);
+        self::assertSame($fallback, $body['data']['message']['content']);
+        $persisted = $this->em->getConnection()->fetchOne(
+            "SELECT content FROM agent_message WHERE conversation_id = CAST(:id AS uuid) AND role = 'assistant'",
+            ['id' => $body['data']['conversationId']],
+        );
+        self::assertSame($fallback, $persisted);
+    }
+
+    public function testToolRoundCapWithoutTextUsesAndPersistsFallback(): void
+    {
+        $owner = $this->createUser('round-cap', 'round-cap-pass-123');
+        $machine = $this->createMachine('Round cap machine', 'rc-'.substr($this->suffix, 0, 8), $owner['user']);
+        static::getContainer()->get(TokenStorageInterface::class)->setToken(
+            new UsernamePasswordToken($owner['user'], 'main', $owner['user']->getRoles()),
+        );
+        $stub = $this->stub();
+        $stub->reset();
+        $controller = static::getContainer()->get(AgentController::class);
+        $controllerOrchestrator = (new ReflectionProperty(AgentController::class, 'orchestrator'))->getValue($controller);
+        self::assertSame($stub, (new ReflectionProperty(AgentOrchestrator::class, 'llm'))->getValue($controllerOrchestrator));
+
+        for ($i = 1; $i <= 5; ++$i) {
+            $stub->addResponse([['type' => 'tool_use', 'id' => 'cap-'.$i, 'name' => 'get_recent_events', 'input' => ['machineId' => $machine->getId()->toRfc4122()]]]);
+        }
+
+        $request = Request::create('/api/agent/chat', 'POST', [], [], [], ['CONTENT_TYPE' => 'application/json'], (string) json_encode(['message' => 'keep checking events']));
+        $response = $controller->chat($request);
+
+        self::assertSame(200, $response->getStatusCode());
+        $fallback = "I couldn't complete that lookup. Please try again.";
+        $body = json_decode((string) $response->getContent(), true);
+        self::assertSame($fallback, $body['data']['message']['content']);
+        self::assertSame(5, $stub->calls);
+        self::assertSame('tool round limit reached', $body['data']['message']['toolCalls'][4]['summary']);
+        $persisted = $this->em->getConnection()->fetchOne(
+            "SELECT content FROM agent_message WHERE conversation_id = CAST(:id AS uuid) AND role = 'assistant'",
+            ['id' => $body['data']['conversationId']],
+        );
+        self::assertSame($fallback, $persisted);
     }
 
     public function testMultipleToolUsesProduceOrderedResultsInOneFollowUpMessage(): void
