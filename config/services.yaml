@@ -83,6 +83,7 @@ services:
         arguments:
             $loginLimiter: '@limiter.auth_login'
             $registerLimiter: '@limiter.auth_register'
+            $refreshLimiter: '@limiter.auth_refresh'
 
     App\Controller\Api\AuthController:
         arguments:

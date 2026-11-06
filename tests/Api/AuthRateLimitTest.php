@@ -40,7 +40,7 @@ final class AuthRateLimitTest extends TestCase
             'interval' => '10 minutes',
         ], new InMemoryStorage());
 
-        $subscriber = new AuthRateLimitSubscriber($loginLimiter, $registerLimiter);
+        $subscriber = new AuthRateLimitSubscriber($loginLimiter, $registerLimiter, $this->limiter('auth_refresh_login', 1000));
 
         $request = Request::create('/api/auth/login', 'POST', [], [], [], ['REMOTE_ADDR' => '203.0.113.7']);
 
@@ -70,7 +70,7 @@ final class AuthRateLimitTest extends TestCase
             'interval' => '10 minutes',
         ], new InMemoryStorage());
 
-        $subscriber = new AuthRateLimitSubscriber($loginLimiter, $registerLimiter);
+        $subscriber = new AuthRateLimitSubscriber($loginLimiter, $registerLimiter, $this->limiter('auth_refresh_register', 1000));
 
         $register = Request::create('/api/auth/register', 'POST', [], [], [], ['REMOTE_ADDR' => '203.0.113.9']);
         $this->runSubscriber($subscriber, $register);
@@ -94,7 +94,7 @@ final class AuthRateLimitTest extends TestCase
             'interval' => '10 minutes',
         ], new InMemoryStorage());
 
-        $subscriber = new AuthRateLimitSubscriber($loginLimiter, $registerLimiter);
+        $subscriber = new AuthRateLimitSubscriber($loginLimiter, $registerLimiter, $this->limiter('auth_refresh_other', 1000));
 
         foreach (['/api/machines', '/api/auth/me', '/api/machines/x/telemetry'] as $path) {
             self::assertNull(
@@ -102,6 +102,40 @@ final class AuthRateLimitTest extends TestCase
                 "{$path} must not touch the auth limiters",
             );
         }
+    }
+
+    public function testRefreshEndpointHasItsOwnPerIpBudget(): void
+    {
+        $subscriber = new AuthRateLimitSubscriber(
+            $this->limiter('auth_refresh_login_iso', 1000),
+            $this->limiter('auth_refresh_register_iso', 1000),
+            $this->limiter('auth_refresh_iso', 1),
+        );
+
+        $request = Request::create('/api/auth/token/refresh', 'POST', [], [], [], ['REMOTE_ADDR' => '203.0.113.11']);
+
+        $first = $this->runSubscriber($subscriber, $request);
+        self::assertNull($first, 'the first rotation must pass through to the firewall');
+
+        $blocked = $this->runSubscriber($subscriber, $request);
+        self::assertNotNull($blocked, 'a burst on the public refresh endpoint must be limited');
+        self::assertSame(429, $blocked->getStatusCode());
+        self::assertSame('TOO_MANY_REQUESTS', json_decode((string) $blocked->getContent(), true)['error']['code']);
+        self::assertGreaterThan(0, (int) $blocked->headers->get('Retry-After'));
+
+        // A different client IP keeps its own budget.
+        $otherClient = Request::create('/api/auth/token/refresh', 'POST', [], [], [], ['REMOTE_ADDR' => '203.0.113.12']);
+        self::assertNull($this->runSubscriber($subscriber, $otherClient));
+    }
+
+    private function limiter(string $id, int $limit): RateLimiterFactory
+    {
+        return new RateLimiterFactory([
+            'id' => $id,
+            'policy' => 'fixed_window',
+            'limit' => $limit,
+            'interval' => '10 minutes',
+        ], new InMemoryStorage());
     }
 
     /**

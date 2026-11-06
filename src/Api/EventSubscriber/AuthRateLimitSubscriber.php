@@ -17,7 +17,13 @@ use Symfony\Component\RateLimiter\RateLimiterFactory;
  * refresh firewall too — neither of which runs a controller.
  *
  *   login    → 5 attempts / 5 min / IP   (limiter.auth_login)
- *   register → 3 attempts / 10 min / IP  (limiter.auth_register)
+ *   register → 3 accounts / 10 min / IP  (limiter.auth_register)
+ *   refresh  → 30 requests / 5 min / IP  (limiter.auth_refresh)
+ *
+ * The refresh bucket is deliberately generous: rotation is single-use and a
+ * normal client presents one token per access-token lifetime, so only bursts
+ * (or a broken retry loop) reach it. It is keyed by IP alone; keying on the
+ * submitted token would let an attacker mint an unlimited number of buckets.
  *
  * 429 + Retry-After in the standard envelope when exceeded.
  */
@@ -26,6 +32,7 @@ final class AuthRateLimitSubscriber implements EventSubscriberInterface
     public function __construct(
         private readonly RateLimiterFactory $loginLimiter,
         private readonly RateLimiterFactory $registerLimiter,
+        private readonly RateLimiterFactory $refreshLimiter,
     ) {
     }
 
@@ -49,6 +56,8 @@ final class AuthRateLimitSubscriber implements EventSubscriberInterface
             $limiter = $this->loginLimiter;
         } elseif ('/api/auth/register' === $path && 'POST' === $request->getMethod()) {
             $limiter = $this->registerLimiter;
+        } elseif ('/api/auth/token/refresh' === $path && 'POST' === $request->getMethod()) {
+            $limiter = $this->refreshLimiter;
         }
 
         if (null === $limiter) {
