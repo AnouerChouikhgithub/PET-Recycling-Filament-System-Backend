@@ -6,10 +6,17 @@ namespace App\Tests\Agent;
 
 use App\Entity\AgentMessage;
 use App\Entity\AgentTokenUsage;
+use App\Entity\MachineCommandAudit;
+use App\Entity\MachineCommandType;
 use App\Service\Agent\AgentTool;
+use App\Service\Agent\Tools\GetAuditLogTool;
+use App\Service\Agent\Tools\GetLatestTelemetryTool;
+use App\Service\Agent\Tools\GetRecentEventsTool;
 use App\Service\Agent\ToolRegistry;
 use Doctrine\ORM\EntityManagerInterface;
 use Monolog\Handler\TestHandler;
+use Symfony\Component\Security\Core\Authentication\Token\Storage\TokenStorageInterface;
+use Symfony\Component\Security\Core\Authentication\Token\UsernamePasswordToken;
 
 /**
  * Provider-failure lifecycle, tool input validation and result bounding
@@ -48,6 +55,58 @@ final class AgentFailureAndValidationTest extends AgentApiTestCase
         $roles = array_map(fn ($m) => $m['role'] ?? $m->getRole(), $messages);
         self::assertContains('user', $roles);
         self::assertNotContains('assistant', $roles, 'a provider failure never creates an assistant answer');
+    }
+
+    public function testAuditLogRejectsInvalidMachineIdBeforeQuery(): void
+    {
+        $owner = $this->createUser('audit-invalid', 'audit-pass-123');
+        static::getContainer()->get(TokenStorageInterface::class)->setToken(
+            new UsernamePasswordToken($owner['user'], 'main', $owner['user']->getRoles()),
+        );
+
+        self::assertSame(
+            ['ok' => false, 'code' => 'VALIDATION_FAILED'],
+            static::getContainer()->get(GetAuditLogTool::class)->execute(['machineId' => 'abc']),
+        );
+    }
+
+    public function testAuditLogForeignValidMachineIsEmptyAndOwnedMachineReturnsRows(): void
+    {
+        $owner = $this->createUser('audit-owner', 'audit-pass-123');
+        $other = $this->createUser('audit-other', 'audit-pass-123');
+        $mine = $this->createMachine('Audit mine', 'am-'.substr($this->suffix, 0, 8), $owner['user']);
+        $theirs = $this->createMachine('Audit theirs', 'at-'.substr($this->suffix, 0, 8), $other['user']);
+        $this->em->persist(new MachineCommandAudit($mine, $owner['user'], MachineCommandType::SetFan, 50.0));
+        $this->em->persist(new MachineCommandAudit($theirs, $other['user'], MachineCommandType::SetFan, 75.0));
+        $this->em->flush();
+
+        static::getContainer()->get(TokenStorageInterface::class)->setToken(
+            new UsernamePasswordToken($owner['user'], 'main', $owner['user']->getRoles()),
+        );
+        $tool = static::getContainer()->get(GetAuditLogTool::class);
+
+        self::assertSame(['ok' => true, 'data' => []], $tool->execute(['machineId' => $theirs->getId()->toRfc4122()]));
+        $ownResult = $tool->execute(['machineId' => $mine->getId()->toRfc4122()]);
+        self::assertTrue($ownResult['ok']);
+        self::assertCount(1, $ownResult['data']);
+        self::assertSame($mine->getName(), $ownResult['data'][0]['machineName']);
+    }
+
+    public function testMachineToolsRejectMalformedUuidBeforeMachineLookup(): void
+    {
+        $owner = $this->createUser('machine-uuid', 'machine-uuid-pass-123');
+        static::getContainer()->get(TokenStorageInterface::class)->setToken(
+            new UsernamePasswordToken($owner['user'], 'main', $owner['user']->getRoles()),
+        );
+
+        self::assertSame(
+            ['ok' => false, 'code' => 'VALIDATION_FAILED'],
+            static::getContainer()->get(GetRecentEventsTool::class)->execute(['machineId' => 'abc']),
+        );
+        self::assertSame(
+            ['ok' => false, 'code' => 'VALIDATION_FAILED'],
+            static::getContainer()->get(GetLatestTelemetryTool::class)->execute(['machineId' => 'abc']),
+        );
     }
 
     public function testThrowingToolBecomesSafeToolErrorData(): void

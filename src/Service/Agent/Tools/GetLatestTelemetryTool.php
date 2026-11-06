@@ -6,6 +6,7 @@ namespace App\Service\Agent\Tools;
 
 use App\Service\Agent\AgentTool;
 use App\Service\Machine\MachineQueryService;
+use Symfony\Component\Uid\Uuid;
 
 /**
  * Latest telemetry for ONE owned machine. Ownership is re-checked in CODE
@@ -52,7 +53,7 @@ final class GetLatestTelemetryTool implements AgentTool
     public function execute(array $input): array
     {
         $machineId = $input['machineId'] ?? null;
-        if (!\is_string($machineId) || '' === $machineId) {
+        if (!\is_string($machineId) || !Uuid::isValid($machineId)) {
             return ['ok' => false, 'code' => 'VALIDATION_FAILED'];
         }
 

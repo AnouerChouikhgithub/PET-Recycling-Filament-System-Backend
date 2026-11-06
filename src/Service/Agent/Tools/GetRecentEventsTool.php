@@ -9,6 +9,7 @@ use App\Entity\MachineCommandAudit;
 use App\Repository\MachineCommandAuditRepository;
 use App\Service\Agent\AgentTool;
 use App\Service\Machine\MachineQueryService;
+use Symfony\Component\Uid\Uuid;
 
 /**
  * Recent events for ONE owned machine. There is no DB store for the MQTT
@@ -50,7 +51,7 @@ final class GetRecentEventsTool implements AgentTool
     public function execute(array $input): array
     {
         $machineId = $input['machineId'] ?? null;
-        if (!\is_string($machineId) || '' === $machineId) {
+        if (!\is_string($machineId) || !Uuid::isValid($machineId)) {
             return ['ok' => false, 'code' => 'VALIDATION_FAILED'];
         }
 
