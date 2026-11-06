@@ -14,6 +14,7 @@ use App\Service\Agent\AgentTool;
 use App\Service\Agent\Tools\GetAuditLogTool;
 use App\Service\Agent\Tools\GetLatestTelemetryTool;
 use App\Service\Agent\Tools\GetRecentEventsTool;
+use App\Service\Agent\UtcDayReset;
 use App\Service\Agent\ToolRegistry;
 use Doctrine\ORM\EntityManagerInterface;
 use Monolog\Handler\TestHandler;
@@ -119,6 +120,15 @@ final class AgentFailureAndValidationTest extends AgentApiTestCase
             ['id' => $body['data']['conversationId']],
         );
         self::assertSame($fallback, $persisted);
+    }
+
+    public function testDailyTokenCapRetryAfterIsSecondsUntilUtcMidnight(): void
+    {
+        $utc = new \DateTimeZone('UTC');
+
+        self::assertSame(3600, UtcDayReset::secondsUntilNextMidnightUtc(new \DateTimeImmutable('2026-11-06 23:00:00', $utc)));
+        self::assertSame(1, UtcDayReset::secondsUntilNextMidnightUtc(new \DateTimeImmutable('2026-11-06 23:59:59', $utc)));
+        self::assertSame(86400, UtcDayReset::secondsUntilNextMidnightUtc(new \DateTimeImmutable('2026-11-06 00:00:00', $utc)));
     }
 
     public function testToolSummariesCountListsButNotAssociativeObjects(): void
