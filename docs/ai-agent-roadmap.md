@@ -1,10 +1,10 @@
-# AI Agent - Phased Implementation Plan (docs only)
+# AI Agent - Phased Implementation Plan
 
-Small, reviewable steps; each ends with stated acceptance criteria. Nothing
-here is implemented yet on this branch. Backend steps come first; each web /
-mobile step depends only on the backend contract, so they can be reviewed in
-parallel. Claims marked Implemented / Prepared / Future per the session rule:
-this document itself is "Prepared" design; all commits here are docs-only.
+Small, reviewable steps; each ends with stated acceptance criteria. The
+backend phase is implemented on this branch; use the README status table for
+verified vs prepared behavior. Backend steps came first; each web / mobile
+step depends only on the backend contract, so they can be reviewed in
+parallel. Claims marked Implemented / Prepared / Future per the session rule.
 
 ## Phase 0 - Guardrails before any agent code
 

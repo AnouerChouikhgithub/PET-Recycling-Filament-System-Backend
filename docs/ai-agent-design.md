@@ -1,6 +1,6 @@
 # AI Agent Design - Backend (Phase 1: Read-Only)
 
-Status: DESIGN ONLY (nothing implemented in this branch).
+Status: design retained; phase 1 backend is implemented on this branch. See the README status table for verified vs prepared behavior.
 Scope: a conversational assistant embedded in the Symfony backend, called
 EXCLUSIVELY from the backend. The web and mobile apps never talk to the model
 and never hold a key. Written after reading: src/Security/MachineAccess.php,
@@ -174,9 +174,9 @@ must surface them as text, tools never throw into the LLM loop uncaught.
       "calls": "a STATIC lookup table (small const array in PHP, in-code,
         ASCII fault codes -> {"title","meaning","safeUserActions"}) compiled
         from the machine states documented in docs/api-contract.md
-        (DECIDED: start minimal - only the five device-reportable lifecycle
-        states + derived-offline wording; extended only as real firmware
-        fault codes land). The
+        (DECIDED: the five device-reportable lifecycle states, derived-offline
+        wording, and the numeric fault codes 1-6 already documented; extended
+        only as real firmware fault codes land). The
         faultCode is matched EXACTLY against the table - any other code
         returns known:false. This tool deliberately does NOT hit the network
         and does NOT pass user text to anything: the model then explains the

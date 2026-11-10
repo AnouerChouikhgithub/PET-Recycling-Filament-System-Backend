@@ -52,6 +52,7 @@ mobile clients are built against.
 
 ```bash
 cd backend
+cp .env.example .env    # first checkout: local env file (git-ignored)
 composer install
 ```
 
@@ -69,9 +70,10 @@ extension=sodium
 
 ## Environment variables
 
-Configuration lives in `.env` (committed defaults) and `.env.local`
-(**not committed** — your real secrets/overrides). `.env.example` holds every
-annotated default.
+Configuration lives in `.env` (local, **git-ignored**; copy it from
+`.env.example` on a fresh checkout) and `.env.local` (local overrides, also
+**git-ignored**). `.env.example` and the secret-free `.env.test` contract are
+the only tracked env files.
 
 | Variable | Required | Default | Meaning | Example placeholder |
 |---|---|---|---|---|
@@ -103,8 +105,8 @@ annotated default.
 \* Powers of the app: `APP_SECRET`, `DATABASE_URL`, `JWT_*`, `MQTT_PASSWORD`,
 `CORS_ALLOW_ORIGIN` in prod. **Never commit `.env.local`.**
 
-Local secrets live in `.env.local` (git-ignored). Committed files hold only
-placeholders.
+Local secrets live in `.env` / `.env.local` (both git-ignored). Committed
+templates hold only placeholders.
 
 ### Production checklist
 
@@ -267,7 +269,7 @@ http://127.0.0.1:8000/api
 | `GET` | `/api/machines/{id}/status` | JWT | Lightweight status poll (effective + reported status) |
 | `GET` | `/api/machines/{id}/dashboard` | JWT | One round trip: machine + telemetry + recent + session + recycling totals |
 | `GET` | `/api/machines/{id}/telemetry` | JWT | Telemetry history (`?limit=&offset=&since=`) |
-| `POST` | `/api/machines/{id}/telemetry` | JWT | **Ingest** one sample (ESP32 / IoT layer) |
+| `POST` | `/api/machines/{id}/telemetry` | Device token | **Ingest** one sample (ESP32 / IoT layer); `X-Device-Token`, not a user JWT |
 | `GET` | `/api/machines/{id}/sessions` | JWT | Session history (`?limit=&offset=&status=`) |
 | `GET` | `/api/machines/{id}/production` | JWT | Filament production records (`?limit=&offset=`) |
 | `GET` | `/api/machines/{id}/recycling` | JWT | Recycling records + impact totals |
@@ -279,7 +281,7 @@ Full request/response shapes: [`docs/api-contract.md`](docs/api-contract.md).
 
 ```bash
 curl -X POST http://127.0.0.1:8000/api/machines/{id}/telemetry \
-  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -H "X-Device-Token: $DEVICE_TOKEN" -H "Content-Type: application/json" \
   -d '{"temperature":192.4,"targetTemperature":195,"heaterState":true,"motorState":true,"motorSpeed":42,"fanState":true,"filamentSpeed":3.1,"filamentDiameter":1.75,"status":"extruding"}'
 ```
 
@@ -383,7 +385,7 @@ from `CORS_ALLOW_ORIGIN`:
 │   └── DataFixtures/             # dev-only sample data
 ├── tests/                        # functional API tests + IoT component tests
 ├── translations/
-├── .env / .env.example / .env.local / .env.test
+├── .env.example / .env.test (tracked); .env / .env.local (git-ignored)
 ├── CHANGELOG.md
 ├── composer.json
 └── README.md
@@ -424,12 +426,12 @@ php bin/phpunit
 | HTTP API (auth, machines, telemetry, sessions, commands) | Implemented |
 | Telemetry ingestion (`TelemetryProcessor`) | Implemented |
 | Guarded machine commands + audit trail | Implemented |
-| MQTT publisher (`MQTT_ENABLED=true`) + audit trail | Implemented |
-| MQTT consumer (`app:mqtt:consume` → `TelemetryProcessor`) | Implemented |
-| Local Mosquitto dev broker with per-device ACL | Implemented (dev only, no TLS) |
+| MQTT publisher (`MQTT_ENABLED=true`) + audit trail | Prepared — code and fake-broker tests; no live broker run recorded |
+| MQTT consumer (`app:mqtt:consume` → `TelemetryProcessor`) | Prepared — code and fake-broker tests; no live broker run recorded |
+| Local Mosquitto dev broker with per-device ACL | Prepared (dev only, no TLS; ACL not verified against a live broker) |
 | Device acknowledgement of commands | Prepared — `commandId`/`expiresAt` on the wire; `deviceAcknowledged` stays `false` until firmware acks |
 | Device-originated events | Prepared — validated and logged, no side effects yet |
-| Realtime transport (WebSocket/SSE/Mercure behind `RealtimeBroadcaster`) | Prepared — both frontends program against the final interface and poll honestly |
+| Realtime transport (WebSocket/SSE/Mercure behind `RealtimeBroadcaster`) | Prepared — backend fan-out seam only; both clients keep honest 10 s polling and never report a socket transport, even when a realtime URL is configured. |
 | ESP32 firmware (incl. device-side auth) | Future — not in this repo; the wire contract is `docs/mqtt-contract.md` |
 | TLS + per-device broker credentials for deployment | Future — the dev broker is plaintext loopback only |
 | Later | refresh-token revocation hardening, session start/write endpoints (machine/firmware owns session lifecycle today), push notifications, admin back-office, deployment (Docker image, CI/CD) |
@@ -440,10 +442,10 @@ php bin/phpunit
   the `deviceTokensEnabled` kill switch.
 * Device tokens are hashed at rest; JWT is RS256, 1 h TTL, single-use refresh
   token via `gesdinet/jwt-refresh-token-bundle`.
-* Auth surface is rate-limited (login 5/5 min, register 3/10 min per IP).
-* **Never commit** `.env.local`, JWT keys (`config/jwt/*.pem`) or broker
+* Auth surface is rate-limited (login 5/5 min, register 3/10 min, refresh 30/5 min per IP).
+* **Never commit** `.env`, `.env.local`, JWT keys (`config/jwt/*.pem`) or broker
   passwords — all are git-ignored. Broker credentials are created by
-  `bin/mqtt-user.ps1` / `bin/mqtt-user.sh` and live only in `.env.local`.
+  `bin/mqtt-user.ps1` / `bin/mqtt-user.sh` and live only in local env files.
 * The dev broker is **loopback-only** (`127.0.0.1:1883`, plaintext,
   `MQTT_TLS=false`). TLS + per-device credentials are required before any
   deployment and are not implemented here.

@@ -36,12 +36,16 @@ clients.
 
 ## Authentication
 
-Stateless JWT (RS256, 1 h TTL) via `Authorization: Bearer <JWT>`.
+User routes use a stateless JWT (RS256, 1 h TTL) via
+`Authorization: Bearer <JWT>`. Telemetry ingest is the exception: it uses a
+per-machine device token via `X-Device-Token`; a user JWT is rejected there.
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
-| POST | `/api/auth/register` | — | `{email, password, name}` → 201 `{token, tokenType:"Bearer", user}` |
-| POST | `/api/auth/login` | — | `{email, password}` → 200 `{token, tokenType:"Bearer", user}` |
+| POST | `/api/auth/register` | — | `{email, password, name}` → 201 `{token, tokenType:"Bearer", refresh_token, user}` |
+| POST | `/api/auth/login` | — | `{email, password}` → 200 `{token, tokenType:"Bearer", refresh_token, user}` |
+| POST | `/api/auth/token/refresh` | refresh token | `{refresh_token}` → rotated `{token, tokenType, refresh_token, user}`; the presented token is single-use |
+| POST | `/api/auth/logout` | JWT + refresh token | `{refresh_token}` → 204; revokes the presented refresh token, always without revealing whether it existed |
 | GET | `/api/me` | JWT | Current user `{id, email, name, roles, createdAt}` |
 
 ## Machines
@@ -98,11 +102,12 @@ All channels are nullable — a sample may carry any subset.
 | Method | Path | Auth | Description |
 |---|---|---|---|
 | GET | `/api/machines/{id}/telemetry?limit=&offset=&since=` | JWT | History, newest first (limit ≤ 200; `since` is ISO-8601, malformed → 422) |
-| POST | `/api/machines/{id}/telemetry` | JWT | Ingest one sample → 201 |
+| POST | `/api/machines/{id}/telemetry` | Device token | Ingest one sample → 201. Header: `X-Device-Token: <token>`; a user JWT is rejected |
 
 ### Ingestion (POST) — used by the ESP32/IoT layer
 
-Body: any subset of the channels above, plus optionally `status` (one of the five
+Authenticate with `X-Device-Token`, never a user Bearer JWT. Body: any subset
+of the channels above, plus optionally `status` (one of the five
 device-reportable lifecycle values — **never** `offline`) and `recordedAt`
 (ISO-8601; defaults to ingestion time). Unknown fields are rejected; ranges are
 enforced (temperature −10…400 °C, diameter 0.5–4 mm, motorSpeed 0–10000 RPM…).
@@ -178,7 +183,7 @@ When `MQTT_ENABLED=true` and the broker publish fails, the endpoint answers
 the *broker* took the message, never that the machine ran it; the ESP32 reports
 actual execution through telemetry/status.
 
-## MQTT architecture (phase 3 — wired: publisher + consumer)
+## MQTT architecture (phase 3 — code and fake-broker tests only; no live broker verified)
 
 Topic tree (prefix configurable via `MQTT_PREFIX`, default `3awedlou`):
 
@@ -214,10 +219,12 @@ connect() · disconnect() · subscribeToMachine(id) · unsubscribe()
 onTelemetry(cb) · onMachineStatus(cb) · onMachineEvent(cb)
 ```
 
-- `VITE_REALTIME_URL` / `EXPO_PUBLIC_REALTIME_URL` set → WebSocket transport
-  (wired when the backend hub ships; the interface is the stable contract).
-- Empty → **honest polling** of `/dashboard` every 10 s, surfaced to the UI as
-  `transport: 'polling'` — the apps never pretend polling is a live stream.
+- `VITE_REALTIME_URL` / `EXPO_PUBLIC_REALTIME_URL` are retained as a future
+  socket target only. The backend hub is not implemented yet, so both clients
+  keep polling even when the variable is set and never report a socket
+  transport until one is actually connected.
+- **Honest polling** of `/dashboard` every 10 s, surfaced to the UI as
+  `transport: 'polling'`. Polling is not represented as a live socket stream.
 - Backend fan-out point: `RealtimeBroadcaster` (logging implementation today,
   WebSocket/SSE/Mercure hub later — one alias swap in `config/services.yaml`).
 
