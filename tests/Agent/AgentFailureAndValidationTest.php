@@ -122,6 +122,57 @@ final class AgentFailureAndValidationTest extends AgentApiTestCase
         self::assertSame($fallback, $persisted);
     }
 
+    public function testFrenchPromptGetsFrenchFallbackAtRoundCap(): void
+    {
+        $owner = $this->createUser('round-cap-fr', 'round-cap-pass-123');
+        $machine = $this->createMachine('Round cap FR', 'rcfr-'.substr($this->suffix, 0, 8), $owner['user']);
+        static::getContainer()->get(TokenStorageInterface::class)->setToken(
+            new UsernamePasswordToken($owner['user'], 'main', $owner['user']->getRoles()),
+        );
+        $stub = $this->stub();
+        $stub->reset();
+        $controller = static::getContainer()->get(AgentController::class);
+
+        for ($i = 1; $i <= 5; ++$i) {
+            $stub->addResponse([['type' => 'tool_use', 'id' => 'cap-fr-'.$i, 'name' => 'get_recent_events', 'input' => ['machineId' => $machine->getId()->toRfc4122()]]]);
+        }
+
+        $request = Request::create('/api/agent/chat', 'POST', [], [], [], ['CONTENT_TYPE' => 'application/json'], (string) json_encode(['message' => 'vérifie encore les événements']));
+        $response = $controller->chat($request);
+
+        self::assertSame(200, $response->getStatusCode());
+        $body = json_decode((string) $response->getContent(), true);
+        self::assertSame("Je n'ai pas pu terminer cette recherche. Veuillez réessayer.", $body['data']['message']['content']);
+        self::assertSame(5, $stub->calls);
+    }
+
+    /**
+     * "comment" is also an English word, so the empty-answer fallback must not
+     * switch language because of it alone.
+     */
+    public function testEnglishPromptWithAmbiguousWordGetsEnglishFallbackAtRoundCap(): void
+    {
+        $owner = $this->createUser('round-cap-en', 'round-cap-en-pass');
+        $machine = $this->createMachine('Round cap EN', 'rcen-'.substr($this->suffix, 0, 8), $owner['user']);
+        static::getContainer()->get(TokenStorageInterface::class)->setToken(
+            new UsernamePasswordToken($owner['user'], 'main', $owner['user']->getRoles()),
+        );
+        $stub = $this->stub();
+        $stub->reset();
+        $controller = static::getContainer()->get(AgentController::class);
+
+        for ($i = 1; $i <= 5; ++$i) {
+            $stub->addResponse([['type' => 'tool_use', 'id' => 'cap-en-'.$i, 'name' => 'get_recent_events', 'input' => ['machineId' => $machine->getId()->toRfc4122()]]]);
+        }
+
+        $request = Request::create('/api/agent/chat', 'POST', [], [], [], ['CONTENT_TYPE' => 'application/json'], (string) json_encode(['message' => 'comment on the last session']));
+        $response = $controller->chat($request);
+
+        self::assertSame(200, $response->getStatusCode());
+        $body = json_decode((string) $response->getContent(), true);
+        self::assertSame("I couldn't complete that lookup. Please try again.", $body['data']['message']['content']);
+    }
+
     public function testDailyTokenCapRetryAfterIsSecondsUntilUtcMidnight(): void
     {
         $utc = new \DateTimeZone('UTC');
@@ -326,6 +377,26 @@ final class AgentFailureAndValidationTest extends AgentApiTestCase
      * must refund the reservation completely. The provider cannot have
      * generated a token, so the conservative floor would be a pure loss.
      */
+    public function testToolResultSizeLimitTruncatesListRowsBeforeRefusingPayload(): void
+    {
+        $owner = $this->createUser('tool-size-limit', 'tool-size-pass-123');
+        $machine = $this->createMachine('M', 'sz-'.substr($this->suffix, 0, 8), $owner['user']);
+        static::getContainer()->get(TokenStorageInterface::class)->setToken(
+            new UsernamePasswordToken($owner['user'], 'main', $owner['user']->getRoles()),
+        );
+        $controller = static::getContainer()->get(AgentController::class);
+        $orchestrator = (new ReflectionProperty(AgentController::class, 'orchestrator'))->getValue($controller);
+        $clamp = new \ReflectionMethod(AgentOrchestrator::class, 'clampResult');
+        $payload = ['ok' => true, 'data' => array_fill(0, 1000, ['name' => str_repeat('x', 100)])];
+
+        $result = $clamp->invoke($orchestrator, $payload);
+
+        self::assertTrue($result['ok']);
+        self::assertTrue($result['truncatedBySizeLimit']);
+        self::assertLessThanOrEqual(AgentOrchestrator::TOOL_RESULT_MAX_BYTES, strlen((string) json_encode($result, JSON_UNESCAPED_SLASHES)));
+        self::assertLessThan(count($payload['data']), count($result['data']));
+    }
+
     public function testPreflightRefusalRefundsTheWholeReservation(): void
     {
         $owner = $this->createUser('f7', 'fail-pass-123');

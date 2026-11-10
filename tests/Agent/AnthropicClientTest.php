@@ -90,6 +90,55 @@ final class AnthropicClientTest extends TestCase
         self::assertSame('object', $body['tools'][0]['input_schema']['type']);
     }
 
+    public function testMultipleToolResultsAreAllSentInCallOrder(): void
+    {
+        $client = $this->client([$this->textMessage('ok')]);
+        $messages = [
+            ['role' => 'user', 'content' => [['type' => 'text', 'text' => 'check both']]],
+            ['role' => 'assistant', 'content' => [
+                ['type' => 'tool_use', 'id' => 'toolu_a', 'name' => 'list_my_machines', 'input' => []],
+                ['type' => 'tool_use', 'id' => 'toolu_b', 'name' => 'get_latest_telemetry', 'input' => ['machineId' => 'm-1']],
+            ]],
+            ['role' => 'tool_result', 'content' => [
+                ['type' => 'tool_result', 'tool_use_id' => 'toolu_a', 'name' => 'list_my_machines',
+                 'content' => ['ok' => true, 'data' => []]],
+                ['type' => 'tool_result', 'tool_use_id' => 'toolu_b', 'name' => 'get_latest_telemetry',
+                 'content' => ['ok' => true, 'data' => ['motorSpeed' => null]]],
+            ]],
+        ];
+
+        $client->complete($messages, $this->tools());
+
+        $resultTurn = array_slice($this->bodyOf($this->requests[0])['messages'], -1)[0];
+        self::assertSame('user', $resultTurn['role']);
+        self::assertCount(2, $resultTurn['content'], 'every tool_use id gets exactly one result');
+        self::assertSame('toolu_a', $resultTurn['content'][0]['tool_use_id']);
+        self::assertSame('toolu_b', $resultTurn['content'][1]['tool_use_id']);
+        self::assertSame(
+            json_encode(['ok' => true, 'data' => ['motorSpeed' => null]], JSON_UNESCAPED_SLASHES),
+            $resultTurn['content'][1]['content'],
+        );
+    }
+
+    public function testEmptyToolInputAndSchemaPropertiesEncodeAsJsonObjects(): void
+    {
+        $client = $this->client([$this->textMessage('ok')]);
+        $messages = [
+            ['role' => 'user', 'content' => [['type' => 'text', 'text' => 'hello']]],
+            ['role' => 'assistant', 'content' => [
+                ['type' => 'tool_use', 'id' => 'toolu_empty', 'name' => 'list_my_machines', 'input' => []],
+            ]],
+        ];
+
+        $client->complete($messages, $this->tools());
+
+        $raw = $this->rawBodyOf($this->requests[0]);
+        self::assertStringContainsString('"input":{}', $raw, 'empty tool input must be an object');
+        self::assertStringContainsString('"properties":{}', $raw, 'empty schema properties must be an object');
+        self::assertStringNotContainsString('"input":[]', $raw);
+        self::assertStringNotContainsString('"properties":[]', $raw);
+    }
+
     public function testConsecutiveUserMessagesMergeIntoOneProviderTurn(): void
     {
         $client = $this->client([$this->textMessage('ok')]);
@@ -425,12 +474,22 @@ final class AnthropicClientTest extends TestCase
      */
     private function bodyOf(array $request): array
     {
-        $body = $request['options']['body'] ?? '';
-        self::assertIsString($body);
+        $body = $this->rawBodyOf($request);
         $decoded = json_decode($body, true);
         self::assertIsArray($decoded);
 
         return $decoded;
+    }
+
+    /**
+     * @param array{options: array<string, mixed>} $request
+     */
+    private function rawBodyOf(array $request): string
+    {
+        $body = $request['options']['body'] ?? '';
+        self::assertIsString($body);
+
+        return $body;
     }
 }
 

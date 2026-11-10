@@ -162,6 +162,12 @@ final class MachineApiTest extends WebTestCase
         self::assertSame('VALIDATION_FAILED', $body['error']['code']);
         self::assertArrayHasKey('since', $body['error']['details']);
 
+        foreach (['yesterday', '2025-02-30T12:00:00Z'] as $invalidSince) {
+            $this->client->request('GET', $url . '?since=' . rawurlencode($invalidSince));
+            self::assertResponseStatusCodeSame(422, 'relative phrases and impossible calendar dates are rejected');
+            self::assertSame('VALIDATION_FAILED', $this->json()['error']['code']);
+        }
+
         $this->client->request('GET', $url . '?since=2000-01-01T00:00:00%2B00:00');
         self::assertResponseIsSuccessful();
         self::assertCount(2, $this->json()['data']);
