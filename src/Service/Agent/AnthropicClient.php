@@ -218,7 +218,9 @@ final class AnthropicClient implements LlmClientInterface
             $payload['system'] = $system;
         }
         if ([] !== $tools) {
-            $payload['tools'] = $tools;
+            // An empty JSON Schema `properties` object must encode as `{}`,
+            // not `[]`; Anthropic rejects the array form for object schemas.
+            $payload['tools'] = array_map($this->wireTool(...), $tools);
         }
 
         return (string) json_encode($payload, JSON_UNESCAPED_SLASHES);
@@ -271,12 +273,16 @@ final class AnthropicClient implements LlmClientInterface
             }
 
             if ('tool_result' === $role) {
-                $wireBlock = $this->wireToolResult($content);
+                $wireBlocks = $this->wireToolResults($content);
+                if ([] === $wireBlocks) {
+                    continue;
+                }
+
                 $last = \count($wire) - 1;
                 if ([] !== $wire && 'user' === $wire[$last]['role']) {
-                    $wire[$last]['content'][] = $wireBlock;
+                    array_push($wire[$last]['content'], ...$wireBlocks);
                 } else {
-                    $wire[] = ['role' => 'user', 'content' => [$wireBlock]];
+                    $wire[] = ['role' => 'user', 'content' => $wireBlocks];
                 }
 
                 continue;
@@ -299,24 +305,63 @@ final class AnthropicClient implements LlmClientInterface
     }
 
     /**
+     * Converts EVERY internal tool-result block into a provider tool_result.
+     * A multi-tool response must send one result per tool_use id in call
+     * order; dropping all but the first breaks the next model turn.
+     *
      * @param mixed $content the internal tool_result-role message content
+     *
+     * @return list<array<string, mixed>>
+     */
+    private function wireToolResults(mixed $content): array
+    {
+        if (!\is_array($content)) {
+            return [];
+        }
+
+        $blocks = [];
+        foreach ($content as $block) {
+            if (!\is_array($block)) {
+                continue;
+            }
+
+            $toolUseId = (string) ($block['tool_use_id'] ?? '');
+            if ('' === $toolUseId) {
+                // A result without its id cannot be matched to a tool_use;
+                // never send an invalid provider block.
+                continue;
+            }
+
+            $result = \is_array($block['content'] ?? null) ? $block['content'] : [];
+
+            // The payload is JSON-ENCODED string data inside the block: it
+            // stays data for the provider, is never executed, and keeps any
+            // embedded quotes/newlines from being interpreted as structure.
+            $blocks[] = [
+                'type' => 'tool_result',
+                'tool_use_id' => $toolUseId,
+                'content' => (string) json_encode($result, JSON_UNESCAPED_SLASHES),
+                'is_error' => !(bool) ($result['ok'] ?? false),
+            ];
+        }
+
+        return $blocks;
+    }
+
+    /**
+     * @param array<string, mixed> $tool
      *
      * @return array<string, mixed>
      */
-    private function wireToolResult(mixed $content): array
+    private function wireTool(array $tool): array
     {
-        $block = \is_array($content) ? ($content[0] ?? null) : null;
-        $result = \is_array($block) && \is_array($block['content'] ?? null) ? $block['content'] : [];
+        $schema = \is_array($tool['input_schema'] ?? null) ? $tool['input_schema'] : [];
+        if (\array_key_exists('properties', $schema) && \is_array($schema['properties']) && [] === $schema['properties']) {
+            $schema['properties'] = (object) [];
+        }
+        $tool['input_schema'] = $schema;
 
-        // The payload is JSON-ENCODED string data inside the block: it stays
-        // data for the provider, is never executed, and keeps any embedded
-        // quotes/newlines from being interpreted as structure.
-        return [
-            'type' => 'tool_result',
-            'tool_use_id' => (string) (\is_array($block) ? ($block['tool_use_id'] ?? '') : ''),
-            'content' => (string) json_encode($result, JSON_UNESCAPED_SLASHES),
-            'is_error' => !(bool) ($result['ok'] ?? false),
-        ];
+        return $tool;
     }
 
     /**
@@ -330,7 +375,24 @@ final class AnthropicClient implements LlmClientInterface
             return [['type' => 'text', 'text' => $content]];
         }
         if (\is_array($content)) {
-            return $content;
+            $blocks = [];
+            foreach ($content as $block) {
+                if (!\is_array($block)) {
+                    continue;
+                }
+                // A no-argument tool call must serialize its input as `{}`,
+                // not `[]`; PHP would otherwise encode an empty array.
+                if ('tool_use' === ($block['type'] ?? null)
+                    && \array_key_exists('input', $block)
+                    && \is_array($block['input'])
+                    && [] === $block['input']
+                ) {
+                    $block['input'] = (object) [];
+                }
+                $blocks[] = $block;
+            }
+
+            return [] === $blocks ? [['type' => 'text', 'text' => '']] : $blocks;
         }
 
         return [['type' => 'text', 'text' => '']];
@@ -370,18 +432,5 @@ final class AnthropicClient implements LlmClientInterface
         }
 
         return mb_substr($type, 0, self::MAX_META_CHARS);
-    }
-}
-
-/**
- * Internal carrier for conditions the policy allows ONE immediate retry for:
- * transport failures (no provider status) and provider 5xx responses.
- */
-final class ProviderRetryableException extends \RuntimeException
-{
-    public function __construct(
-        public readonly ?int $status,
-    ) {
-        parent::__construct('provider call retryable');
     }
 }

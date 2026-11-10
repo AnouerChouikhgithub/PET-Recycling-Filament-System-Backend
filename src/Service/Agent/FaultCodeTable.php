@@ -9,9 +9,10 @@ namespace App\Service\Agent;
  * exact match is the injection barrier - any code not listed here returns
  * known:false and the model must not invent a meaning).
  *
- * DECIDED (session 1): start minimal - only the five device-reportable
- * lifecycle states plus the derived-offline wording out of
- * docs/api-contract.md. Extended only as real firmware fault codes land.
+ * DECIDED (session 1): start with the five device-reportable lifecycle
+ * states, the derived-offline wording, and the numeric device fault codes
+ * already published in docs/api-contract.md. Extend only as real firmware
+ * fault codes land.
  */
 final class FaultCodeTable
 {

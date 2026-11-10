@@ -52,6 +52,10 @@ final class AgentOrchestrator
     /** Hard byte bound for ONE tool_result payload. */
     public const TOOL_RESULT_MAX_BYTES = 8000;
 
+    private const FALLBACK_EN = "I couldn't complete that lookup. Please try again.";
+
+    private const FALLBACK_FR = "Je n'ai pas pu terminer cette recherche. Veuillez réessayer.";
+
     public function __construct(
         private readonly LlmClientInterface $llm,
         private readonly ToolRegistry $registry,
@@ -165,8 +169,12 @@ final class AgentOrchestrator
             $resultBlocks = [];
             $toolRoundLimitReached = false;
 
+            // One model response is one tool round, regardless of how many
+            // tools it asks for. Every call in the same response shares the
+            // same budget decision.
+            ++$rounds;
+
             foreach ($toolUses as $toolUse) {
-                ++$rounds;
                 $toolName = (string) ($toolUse['name'] ?? '');
                 $toolUseId = (string) ($toolUse['id'] ?? '');
                 if ('' === $toolUseId) {
@@ -211,7 +219,7 @@ final class AgentOrchestrator
         }
 
         if ('' === $answer) {
-            $answer = "I couldn't complete that lookup. Please try again.";
+            $answer = $this->fallbackFor($message);
         }
 
         // Assistant message + REAL usage settle commit atomically: the client
@@ -236,7 +244,8 @@ final class AgentOrchestrator
             'user_id' => $user->getId()->toRfc4122(),
             'conversation_id' => $conversation->getId()->toRfc4122(),
             'message_id' => $assistantMessage->getId()->toRfc4122(),
-            'tool_rounds' => \count($toolCalls),
+            'tool_calls' => \count($toolCalls),
+            'tool_rounds' => $rounds,
             'usage_input' => $usageTotal['input'],
             'usage_output' => $usageTotal['output'],
         ]);
@@ -342,7 +351,10 @@ final class AgentOrchestrator
         if (\is_array($data) && array_is_list($data)) {
             while (\count($data) > 1) {
                 array_pop($data);
-                $candidate = $result + ['data' => $data, 'truncatedBySizeLimit' => true];
+                // Array union preserves the original `data` key, which made
+                // every retry re-measure the untruncated payload and silently
+                // fall through to TOOL_RESULT_TOO_LARGE. Replace the field.
+                $candidate = array_replace($result, ['data' => $data, 'truncatedBySizeLimit' => true]);
                 $length = \strlen((string) json_encode($candidate, JSON_UNESCAPED_SLASHES));
                 if ($length <= self::TOOL_RESULT_MAX_BYTES) {
                     return $candidate;
@@ -377,6 +389,30 @@ final class AgentOrchestrator
         $clamped = function_exists('mb_substr') ? mb_substr($message, 0, 80) : substr($message, 0, 80);
 
         return trim($clamped);
+    }
+
+    /**
+     * The empty-answer fallback follows the language of the user's message:
+     * the assistant supports French and English, and the model may fail
+     * before it can answer in the requested language.
+     */
+    private function fallbackFor(string $message): string
+    {
+        // Accents are decisive. Without them a single short word is too weak
+        // ("comment" is also English), so require either one strong marker or
+        // two distinct common French words before claiming the language.
+        if (preg_match('/[àâäçéèêëîïôöùûüÿœæ]/iu', $message)) {
+            return self::FALLBACK_FR;
+        }
+
+        if (preg_match('/\b(?:je|nous|vous|pourquoi|bonjour|merci|quel|quelle|sont|avec)\b/iu', $message)) {
+            return self::FALLBACK_FR;
+        }
+
+        preg_match_all('/\b(?:mon|ma|mes|le|la|les|un|une|des|du|est|pas|pour|dans)\b/iu', $message, $matches);
+        $distinct = \count(array_unique(array_map('mb_strtolower', $matches[0])));
+
+        return $distinct >= 2 ? self::FALLBACK_FR : self::FALLBACK_EN;
     }
 
     /**

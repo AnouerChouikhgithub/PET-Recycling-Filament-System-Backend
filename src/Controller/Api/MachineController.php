@@ -15,8 +15,8 @@ use Symfony\Component\Routing\Attribute\Route;
 /**
  * Machine read API (phase 1 foundation).
  *
- * POST /api/machines/{id}/commands is deliberately NOT implemented — IoT
- * command execution arrives in phase 2 (MQTT). See README.
+ * Command dispatch lives in IotController (POST /api/machines/{id}/commands)
+ * so the read and write surfaces stay separate. See README.
  */
 final class MachineController
 {
@@ -130,6 +130,18 @@ final class MachineController
         $sinceParam = $request->query->get('since');
         if (!\is_string($sinceParam) || '' === $sinceParam) {
             return null;
+        }
+
+        // DateTimeImmutable accepts relative phrases such as "yesterday" and
+        // normalizes impossible dates. The public API contract is ISO-8601 only.
+        $parsed = date_parse($sinceParam);
+        if (!preg_match('/^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:[.][0-9]+)?(?:Z|[+-][0-9]{2}:[0-9]{2})$/i', $sinceParam)
+            || $parsed['error_count'] > 0
+            || $parsed['warning_count'] > 0
+        ) {
+            throw new ValidationException('The provided data is invalid.', [
+                'since' => ['Must be a valid ISO-8601 date/time.'],
+            ]);
         }
 
         try {
