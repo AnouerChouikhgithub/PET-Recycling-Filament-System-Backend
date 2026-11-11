@@ -1,0 +1,20 @@
+# PREPARED, NEVER RUN. Production Mosquitto ACL.
+#
+# Same rule as development: a machine's broker username MUST equal its
+# Machine.identifier, so the %u patterns pin every device to its own topic
+# branch. A device can never read another machine's commands and can never
+# publish outside its three own branches.
+#
+# Replace 3awedlou only if MQTT_PREFIX changes; the two must always agree.
+
+# ---------------------------------------------------------------- backend ----
+# The Symfony publisher and app:mqtt:consume share this account. It is the only
+# account with a wildcard grant.
+user backend
+topic readwrite 3awedlou/#
+
+# --------------------------------------------------------------- machines ----
+pattern write 3awedlou/machines/%u/telemetry
+pattern write 3awedlou/machines/%u/status
+pattern write 3awedlou/machines/%u/events
+pattern read 3awedlou/machines/%u/commands
