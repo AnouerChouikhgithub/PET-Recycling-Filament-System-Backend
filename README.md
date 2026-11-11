@@ -42,7 +42,7 @@ has never run live. `Future` = not implemented.
 | AI assistant (read-only, 5 tools) | Prepared | Functionally tested with a scripted stub (`tests/Agent/*`); **no live Anthropic call has ever run** |
 | MQTT publisher and consumer | Prepared | Fake-broker tests only; real-broker tests skip without `MQTT_TEST_HOST` |
 | Local Mosquitto broker + per-device ACL | Prepared | Dev-only, plaintext loopback, ACL never verified live |
-| Device acknowledgement of commands | Prepared | `commandId`/`expiresAt` on the wire; `deviceAcknowledged` stays `false` |
+| Device acknowledgement of commands | Prepared | Matches real firmware `command_ack` to the audit row; fake-MQTT tests only, no live broker/device |
 | Device-originated events | Prepared | Validated + logged, no side effects |
 | Realtime push transport | Future | `RealtimeBroadcaster` logs only; clients poll honestly every 10 s |
 | Web scaffold (AssetMapper/Twig/Stimulus) | Prepared | Dev-only scaffold, not used by the JSON API |
@@ -300,9 +300,11 @@ only from paused; `pause`/`stop` only while running; numeric values within
 `COMMAND_*` limits. Violations → `422 VALIDATION_FAILED`.
 
 `delivery` is `published_to_broker` (the **broker** accepted it) or
-`buffered_not_sent` (nothing left the process). `deviceAcknowledged` is always
-`false` until firmware acknowledgements exist. **Acceptance ≠ execution** — only
-fresh telemetry/status proves what the machine did. Broker publish failure →
+`buffered_not_sent` (nothing left the process). The immediate 202 always has
+`deviceAcknowledged: false`: a device ack cannot exist yet. It becomes true only
+when a matching `command_ack` for that command id **and machine** arrives over
+MQTT and is stored on the audit row. **Acceptance ≠ execution** — only fresh
+telemetry/status proves what the machine did. Broker publish failure →
 `503 MQTT_UNAVAILABLE`.
 
 ## MQTT contract
@@ -320,7 +322,7 @@ Web/Mobile → Symfony → MQTT → ESP32.
 |---|---|---|---|---|
 | `{prefix}/machines/{identifier}/telemetry` | device → backend | 1 | no | sensor samples |
 | `{prefix}/machines/{identifier}/status` | device → backend | 1 | no | lifecycle `{"online": bool}` incl. Last Will |
-| `{prefix}/machines/{identifier}/events` | device → backend | 1 | no | log-worthy events |
+| `{prefix}/machines/{identifier}/events` | device → backend | 1 | no | events + `command_ack` |
 | `{prefix}/machines/{identifier}/commands` | backend → device | `MQTT_QOS` | **never** | command envelope |
 
 `{identifier}` is `Machine.identifier`, not the UUID. A retained command would
@@ -360,8 +362,20 @@ Status is exactly `{"online": true|false}`. `online=true` refreshes
 `lastSeenAt`; `online=false` (graceful disconnect or Last Will) makes the derived
 offline state effective immediately. `offline` is never written to the column.
 
-Events are a non-empty JSON object, optionally with a string `type`; they are
-validated and logged metadata-only, with no side effects yet.
+Events are a non-empty JSON object, optionally with a string `type`. The gateway
+publishes real acknowledgements here (read from the firmware contract):
+
+```json
+{ "type": "command_ack", "commandId": "<audit uuid>", "accepted": true, "reason": 0 }
+```
+
+`accepted=false` is a device rejection (with the firmware `reason` code); the
+gateway itself emits failure acks for expiry/timeout. The consumer matches the
+ack to `machine_command_audit` by **command id and machine** and stores the
+first terminal state in nullable `acknowledged_at` / `ack_status`
+(`accepted`|`rejected`). Unknown ids, foreign machines, duplicates and
+malformed payloads are ignored and counted; payloads are never logged. Other
+event types remain validated + logged metadata-only with no side effects.
 
 Commands:
 

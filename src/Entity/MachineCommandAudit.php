@@ -47,6 +47,14 @@ class MachineCommandAudit
     #[ORM\Column(type: Types::DATETIME_IMMUTABLE)]
     private \DateTimeImmutable $createdAt;
 
+    /** Set only when the gateway/device acknowledged THIS command id over MQTT. */
+    #[ORM\Column(type: Types::DATETIME_IMMUTABLE, nullable: true)]
+    private ?\DateTimeImmutable $acknowledgedAt = null;
+
+    /** accepted | rejected (the firmware contract has no other terminal states). */
+    #[ORM\Column(length: 16, nullable: true)]
+    private ?string $ackStatus = null;
+
     public function __construct(Machine $machine, ?User $user, MachineCommandType $command, ?float $value)
     {
         $this->id = Uuid::v7();
@@ -97,5 +105,34 @@ class MachineCommandAudit
     public function getCreatedAt(): \DateTimeImmutable
     {
         return $this->createdAt;
+    }
+
+    public function getAcknowledgedAt(): ?\DateTimeImmutable
+    {
+        return $this->acknowledgedAt;
+    }
+
+    public function getAckStatus(): ?string
+    {
+        return $this->ackStatus;
+    }
+
+    public function isAcknowledged(): bool
+    {
+        return null !== $this->acknowledgedAt;
+    }
+
+    /**
+     * First real acknowledgement wins. A duplicate/replayed event must not
+     * rewrite the terminal state.
+     */
+    public function acknowledge(string $status): void
+    {
+        if (null !== $this->acknowledgedAt) {
+            return;
+        }
+
+        $this->acknowledgedAt = new \DateTimeImmutable();
+        $this->ackStatus = $status;
     }
 }

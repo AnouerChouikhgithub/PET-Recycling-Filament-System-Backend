@@ -6,11 +6,14 @@ namespace App\Service\IoT;
 
 use App\Api\Exception\ValidationException;
 use App\Entity\Machine;
+use App\Entity\MachineCommandAudit;
+use App\Repository\MachineCommandAuditRepository;
 use App\Repository\MachineRepository;
 use App\Service\Machine\MachineConnectivityService;
 use Doctrine\DBAL\Exception as DbalException;
 use Doctrine\ORM\EntityManagerInterface;
 use Psr\Log\LoggerInterface;
+use Symfony\Component\Uid\Uuid;
 
 /**
  * ALL inbound MQTT message logic, isolated from the socket so it can be unit
@@ -48,6 +51,7 @@ final class MqttMessageHandler
         private readonly MqttConfig $config,
         private readonly MqttTopicBuilder $topics,
         private readonly MachineRepository $machines,
+        private readonly MachineCommandAuditRepository $audits,
         private readonly TelemetryProcessor $telemetryProcessor,
         private readonly MachineConnectivityService $connectivity,
         private readonly EntityManagerInterface $em,
@@ -236,12 +240,68 @@ final class MqttMessageHandler
             return;
         }
 
+        if ('command_ack' === ($data['type'] ?? null)) {
+            $this->handleCommandAck($machine, $identifier, $data);
+
+            return;
+        }
+
         $this->count('event');
         $this->logger->info('MQTT event received (prepared, not acted on).', [
             'machine' => $identifier,
             'type' => $data['type'] ?? null,
             // Field names, not values: an event is free-form device input.
             'fields' => array_keys($data),
+        ]);
+    }
+
+    /**
+     * Device acknowledgement. The firmware publishes:
+     *   topic {prefix}/machines/{identifier}/events
+     *   {"type":"command_ack","commandId":"...","accepted":true|false,"reason":N}
+     *
+     * Only a row for THIS machine and THIS command id may transition. Unknown
+     * ids, foreign machines, duplicates and malformed payloads are ignored
+     * (metadata-only logging; the payload is never echoed).
+     *
+     * @param array<string, mixed> $data
+     */
+    private function handleCommandAck(Machine $machine, string $identifier, array $data): void
+    {
+        $commandId = $data['commandId'] ?? null;
+        $accepted = $data['accepted'] ?? null;
+
+        if (!is_string($commandId) || !Uuid::isValid($commandId) || !is_bool($accepted)) {
+            $this->drop('Malformed command_ack dropped.', ['machine' => $identifier]);
+
+            return;
+        }
+
+        $audit = $this->audits->find(Uuid::fromString($commandId));
+        if (!$audit instanceof MachineCommandAudit
+            || !$audit->getMachine()->getId()->equals($machine->getId())
+        ) {
+            $this->count('command_ack_ignored');
+            $this->logger->notice('Command acknowledgement did not match a command for this machine.', [
+                'machine' => $identifier,
+            ]);
+
+            return;
+        }
+
+        if ($audit->isAcknowledged()) {
+            $this->count('command_ack_duplicate');
+            $this->logger->info('Duplicate command acknowledgement ignored.', ['machine' => $identifier]);
+
+            return;
+        }
+
+        $audit->acknowledge($accepted ? 'accepted' : 'rejected');
+        $this->em->flush();
+        $this->count('command_ack');
+        $this->logger->info('Command acknowledgement recorded.', [
+            'machine' => $identifier,
+            'status' => $audit->getAckStatus(),
         ]);
     }
 

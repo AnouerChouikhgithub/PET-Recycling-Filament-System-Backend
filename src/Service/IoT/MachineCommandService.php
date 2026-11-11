@@ -161,7 +161,9 @@ final class MachineCommandService
             'commandId' => $audit->getId()->toRfc4122(),
             // Honesty marker: clients must NOT treat this as machine execution.
             'delivery' => $this->mqttConfig->isEnabled() ? 'published_to_broker' : 'buffered_not_sent',
-            'deviceAcknowledged' => false,
+            // False at dispatch; only a matching MQTT command_ack can set the
+            // audit row, and this immediate 202 is built before any ack arrives.
+            'deviceAcknowledged' => $audit->isAcknowledged(),
             'sentAt' => $issuedAt->format(\DateTimeInterface::ATOM),
             // The instant after which the command is stale (sentAt + TTL).
             'expiresAt' => $expiresAt->format(\DateTimeInterface::ATOM),
