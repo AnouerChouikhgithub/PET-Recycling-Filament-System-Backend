@@ -135,7 +135,7 @@ Tracked templates hold placeholders only. Real values belong in `.env` /
 | `AGENT_ENABLED` | no | `false` | `false` = every `/api/agent` route answers 404 `AGENT_DISABLED` |
 | `ANTHROPIC_API_KEY` | only for live answers | — | **secret**; `.env.local`/process env only |
 | `AGENT_MODEL` | no | `claude-sonnet-4-5` | model name from env, never hard-coded |
-| `AGENT_BASE_URL` | no | empty | provider/proxy override |
+| `AGENT_BASE_URL` | no | empty | provider/proxy override; must be **https** (plain http only for loopback or `APP_ENV=test`); redirects are refused |
 | `AGENT_MAX_TOKENS` | no | `1024` | per model response |
 | `AGENT_MAX_TOOL_ROUNDS` | no | `4` | model rounds per turn (one response = one round) |
 | `AGENT_CONTEXT_MESSAGES` | no | `12` | transcript window |
@@ -144,7 +144,9 @@ Tracked templates hold placeholders only. Real values belong in `.env` /
 | `AGENT_DAILY_TOKEN_CAP` | no | `200000` | per user per UTC day |
 | `AGENT_MSG_MAX_CHARS` | no | `4000` | message length |
 | `AGENT_CONNECT_TIMEOUT_SEC` / `AGENT_REQUEST_TIMEOUT_SEC` | no | `5` / `30` | provider timeouts |
-| `AGENT_TURN_DEADLINE_SEC` | no | `45` | whole-turn budget, checked before every model call; expiry returns the fallback answer |
+| `AGENT_TURN_DEADLINE_SEC` | no | `45` | whole-turn budget, checked before every model call; expiry returns the fallback answer and settles the reservation |
+| `TRUSTED_PROXIES` | no | empty | comma-separated proxy IPs/CIDRs allowed to supply forwarded headers; empty = trust none |
+| `TRUSTED_HEADERS` | prod | `x-forwarded-for,...` | comma-separated forwarded headers honored from a trusted proxy |
 | `MQTT_ENABLED` | no | `false` | `true` = real broker publisher |
 | `MQTT_HOST` / `MQTT_PORT` | no | `localhost` / `1883` | broker address |
 | `MQTT_USERNAME` / `MQTT_PASSWORD` | for a live broker | — | **credentials; `.env.local` only** |
@@ -457,10 +459,15 @@ soft-deleted conversation), `429 AGENT_RATE_LIMITED` (Retry-After seconds),
 `429 AGENT_DAILY_TOKEN_CAP` (Retry-After = seconds until 00:00 UTC),
 `503 AGENT_LLM_UNAVAILABLE`.
 
+Every turn has a wall-clock budget (`AGENT_TURN_DEADLINE_SEC`, default 45 s)
+checked before each model call; expiry returns the normal fallback answer and
+settles the reservation for completed calls (or refunds when none ran).
+
 **Never run live:** no Anthropic request has been made from this repository.
 Provider behaviour, real token accounting and French/English answer quality are
 verified only with a deterministic stub. Agent HTTP bodies are not logged;
-provider logs are metadata-only.
+provider logs are metadata-only. A 3xx provider response is refused rather than
+followed, and an external plain-http `AGENT_BASE_URL` fails before any request.
 
 ## Time handling
 
@@ -501,8 +508,8 @@ composer validate --no-check-publish
 php bin/console debug:router    # route table
 ```
 
-Current results (2026-11-11): **148 tests, 872 assertions, 2 skipped** (the
-skipped tests are the real-broker MQTT integration tests). PHPStan: **no
+Current results (2026-11-11, round 4): **168 tests, 936 assertions, 2 skipped**
+(the skipped tests are the real-broker MQTT integration tests). PHPStan: **no
 errors**. `lint:container` and `composer validate` pass. `git diff --check`
 is clean.
 
@@ -550,10 +557,12 @@ of this repository.
 * JWT is RS256 with a 1 h TTL. Tests sign with a dedicated throwaway pair in
   `config/jwt/test/` and can never use the real keys; `tests/bootstrap.php`
   refuses to run without them. Refresh tokens are single-use and hashed; the
-  backend can revoke them, but neither client stores or rotates one yet.
+  mobile client stores and rotates them (single-flight, SecureStore), while the
+  web deliberately keeps only the short-lived access token.
 * Auth surface is rate-limited per IP (login 5/5 min, register 3/10 min, refresh
-  30/5 min). Behind a proxy, configure trusted proxies so `getClientIp()` is
-  trustworthy.
+  30/5 min). Behind a proxy, set `TRUSTED_PROXIES` (and `TRUSTED_HEADERS` in
+  prod) so `getClientIp()` is trustworthy; with them empty, `X-Forwarded-For`
+  is ignored and the direct peer address is used.
 * `.env`, `.env.local`, JWT keys and broker passwords are git-ignored. `.env` is
   no longer tracked; rotate anything that existed in Git history.
 * Dev broker is plaintext loopback only. Never expose it; deployment requires
@@ -567,14 +576,21 @@ of this repository.
 - Fresh REAL JWT keypair and a new real passphrase: the old passphrase is in
   Git history. The test pair and `.env.test` passphrase are throwaway only.
 - Pin `CORS_ALLOW_ORIGIN` to the real web origin; never `*` with credentials.
-- Set `trusted_proxies` for the actual reverse proxy / load balancer.
+- Set `TRUSTED_PROXIES` to the actual reverse proxy / load balancer and
+  `TRUSTED_HEADERS` to the headers it sets. Caddy example: Caddy on
+  `127.0.0.1` with `reverse_proxy 127.0.0.1:8000` sets `X-Forwarded-For`;
+  then `TRUSTED_PROXIES=127.0.0.1` and
+  `TRUSTED_HEADERS=x-forwarded-for,x-forwarded-proto,x-forwarded-host,x-forwarded-port`.
+  Never trust a public range.
 - Point `cache.app` at a shared store (Redis) before running more than one node —
   the agent rate-limit window is node-local on the filesystem today.
 - Broker: TLS on 8883, per-device credentials, no anonymous access, ACL loaded.
 - Rotate every secret that was ever committed (historical `.env`, DB/broker
   credentials and the historical JWT passphrase) before exposing the service.
 - Enable backups and the telemetry pruning command on a schedule.
-- Decide the admin-command policy and the refresh-token transport before go-live.
+- Policies already decided: commands are strictly owner-only (admins keep REST
+  reads); mobile rotates refresh tokens, the web uses access-token-only with
+  logout on 401. A cookie-based web refresh remains Future.
 
 ## Not run live (honest list)
 
