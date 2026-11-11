@@ -504,7 +504,9 @@ of this repository.
 
 * Owner/device isolation is enforced by `MachineAccess`; device tokens are
   hashed at rest and honour the machine kill switch.
-* JWT is RS256 with a 1 h TTL. Refresh tokens are single-use and hashed; the
+* JWT is RS256 with a 1 h TTL. Tests sign with a dedicated throwaway pair in
+  `config/jwt/test/` and can never use the real keys; `tests/bootstrap.php`
+  refuses to run without them. Refresh tokens are single-use and hashed; the
   backend can revoke them, but neither client stores or rotates one yet.
 * Auth surface is rate-limited per IP (login 5/5 min, register 3/10 min, refresh
   30/5 min). Behind a proxy, configure trusted proxies so `getClientIp()` is
@@ -519,14 +521,15 @@ of this repository.
 ## Deployment checklist
 
 - `APP_ENV=prod`, strong `APP_SECRET`, production `DATABASE_URL`, migrations run.
-- Fresh JWT keypair (or inject key paths/passphrase as environment variables).
+- Fresh REAL JWT keypair and a new real passphrase: the old passphrase is in
+  Git history. The test pair and `.env.test` passphrase are throwaway only.
 - Pin `CORS_ALLOW_ORIGIN` to the real web origin; never `*` with credentials.
 - Set `trusted_proxies` for the actual reverse proxy / load balancer.
 - Point `cache.app` at a shared store (Redis) before running more than one node —
   the agent rate-limit window is node-local on the filesystem today.
 - Broker: TLS on 8883, per-device credentials, no anonymous access, ACL loaded.
-- Rotate every secret that was ever committed (including historical `.env` and
-  the `.env.test` JWT passphrase) before exposing the service.
+- Rotate every secret that was ever committed (historical `.env`, DB/broker
+  credentials and the historical JWT passphrase) before exposing the service.
 - Enable backups and the telemetry pruning command on a schedule.
 - Decide the admin-command policy and the refresh-token transport before go-live.
 
