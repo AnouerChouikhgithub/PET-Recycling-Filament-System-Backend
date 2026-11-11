@@ -76,6 +76,22 @@ final class MqttConsumeCommandTest extends KernelTestCase
         self::assertSame(['received' => 5, 'dropped' => 5], $this->handler->counters());
     }
 
+    public function testUnlimitedMemoryLimitIsAcceptedAndWatchesNothing(): void
+    {
+        $this->subscriber->push('3awedlou/machines/absent-unlimited/telemetry', '{}');
+        $tester = $this->tester(new MqttConfig(enabled: true, host: '127.0.0.1'));
+
+        // "-1" is PHP's own "unlimited": it must not be rejected as an invalid size.
+        self::assertSame(Command::SUCCESS, $tester->execute([
+            '--max-runtime' => '0',
+            '--max-messages' => '1',
+            '--memory-limit' => '-1',
+            '--stop-file' => $this->stopFile,
+        ]));
+        self::assertStringContainsString('Message limit of 1 reached', $tester->getDisplay());
+        self::assertStringNotContainsString('Invalid --memory-limit', $tester->getDisplay());
+    }
+
     public function testPortableStopFileEndsTheRunAndIsRemoved(): void
     {
         $stopFile = $this->stopFile;

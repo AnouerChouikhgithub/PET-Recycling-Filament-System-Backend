@@ -86,16 +86,21 @@ final class MqttConsumeCommand extends Command
         $memoryLimitBytes = null;
 
         if (\is_string($memoryLimitRaw) && '' !== $memoryLimitRaw) {
-            $memoryLimitBytes = $this->toBytes($memoryLimitRaw);
-            if ($memoryLimitBytes <= 0) {
-                $io->error(sprintf('Invalid --memory-limit "%s" (use a PHP size such as 256M, 1G, or -1 for unlimited).', $memoryLimitRaw));
+            if ('-1' === trim($memoryLimitRaw)) {
+                // PHP's own "no limit": nothing to apply, nothing to watch.
+                $memoryLimitRaw = null;
+            } else {
+                $memoryLimitBytes = $this->toBytes($memoryLimitRaw);
+                if ($memoryLimitBytes <= 0) {
+                    $io->error(sprintf('Invalid --memory-limit "%s" (use a PHP size such as 256M, 1G, or -1 for unlimited).', $memoryLimitRaw));
 
-                return Command::FAILURE;
+                    return Command::FAILURE;
+                }
+                // Bounding the process here would make PHP fatal before we can
+                // report anything, so the option is applied to the ini and the
+                // graceful exit happens at the 90% watermark below.
+                ini_set('memory_limit', $memoryLimitRaw);
             }
-            // Bounding the process here would make PHP fatal before we can
-            // report anything, so the option is applied to the ini and the
-            // graceful exit happens at the 90% watermark below.
-            ini_set('memory_limit', $memoryLimitRaw);
         }
 
         $maxMessages = max(0, (int) $input->getOption('max-messages'));
@@ -238,11 +243,11 @@ final class MqttConsumeCommand extends Command
         }
     }
 
-    /** Parse a PHP-style size ("256M", "1G", "-1") into bytes (0 = unlimited). */
+    /** Parse a PHP-style size ("256M", "1G") into bytes; 0 means unusable. */
     private function toBytes(string $value): int
     {
         $value = trim($value);
-        if ('' === $value || '-1' === $value) {
+        if ('' === $value) {
             return 0;
         }
 
