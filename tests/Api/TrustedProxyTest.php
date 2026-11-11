@@ -26,7 +26,7 @@ final class TrustedProxyTest extends KernelTestCase
 
     public function testForwardedForIsIgnoredWithoutTrustedProxies(): void
     {
-        Request::setTrustedProxies([], 0);
+        self::bootKernel();
 
         $request = $this->requestFromProxy('198.51.100.10');
 
