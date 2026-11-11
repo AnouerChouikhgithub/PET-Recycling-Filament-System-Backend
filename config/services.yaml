@@ -24,6 +24,8 @@ parameters:
     app.agent.connect_timeout_default: 5
     app.agent.request_timeout_default: 30
     app.agent.turn_deadline_default: 45
+    app.agent.retention_days_default: 30
+    app.agent.soft_delete_grace_days_default: 7
     # Domain exception → stable API error code + HTTP status.
     # Consumed by App\Api\EventSubscriber\ApiExceptionSubscriber; add new
     # mappings here instead of editing subscriber code.
@@ -189,6 +191,8 @@ services:
             $connectTimeoutSec: '%env(default:app.agent.connect_timeout_default:int:AGENT_CONNECT_TIMEOUT_SEC)%'
             $requestTimeoutSec: '%env(default:app.agent.request_timeout_default:int:AGENT_REQUEST_TIMEOUT_SEC)%'
             $turnDeadlineSec: '%env(default:app.agent.turn_deadline_default:int:AGENT_TURN_DEADLINE_SEC)%'
+            $retentionDays: '%env(default:app.agent.retention_days_default:int:AGENT_RETENTION_DAYS)%'
+            $softDeleteGraceDays: '%env(default:app.agent.soft_delete_grace_days_default:int:AGENT_SOFT_DELETE_GRACE_DAYS)%'
 
     # REAL provider (session 2). The TEST environment rebinds this alias to
     # the scripted stub (config/packages/test/services.yaml) so the suite

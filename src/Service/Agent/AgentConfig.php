@@ -40,6 +40,10 @@ final class AgentConfig
         public readonly int $requestTimeoutSec = self::DEFAULT_REQUEST_TIMEOUT_SEC,
         /** Whole-turn budget checked before every model call. */
         public readonly int $turnDeadlineSec = 45,
+        /** Inactive conversation retention period. */
+        public readonly int $retentionDays = 30,
+        /** Grace period after user soft-delete. */
+        public readonly int $softDeleteGraceDays = 7,
     ) {
     }
 
