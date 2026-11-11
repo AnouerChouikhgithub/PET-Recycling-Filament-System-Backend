@@ -44,6 +44,8 @@ has never run live. `Future` = not implemented.
 | Local Mosquitto broker + per-device ACL | Prepared | Dev-only, plaintext loopback, ACL never verified live |
 | Device acknowledgement of commands | Prepared | Matches real firmware `command_ack` to the audit row; fake-MQTT tests only, no live broker/device |
 | Device-originated events | Prepared | Validated + logged, no side effects |
+| Health endpoint | Implemented | `tests/Api/HealthApiTest.php`, `HealthControllerTest.php` — public, DB-liveness only, no host/schema/driver detail |
+| Production packaging (image, compose, Caddy, TLS broker) | Prepared | `Dockerfile`, `compose.prod.yaml`, `deploy/` — **never built or started**; see Deployment |
 | Realtime push transport | Future | `RealtimeBroadcaster` logs only; clients poll honestly every 10 s |
 | Web scaffold (AssetMapper/Twig/Stimulus) | Prepared | Dev-only scaffold, not used by the JSON API |
 | ESP32 firmware, TLS broker, deployment | Future | Not in this repository |
@@ -56,7 +58,7 @@ has never run live. `Future` = not implemented.
 | Composer | 2.10 | |
 | Symfony | **7.4 LTS** | pinned as `symfony/*: 7.4.*` |
 | PostgreSQL | **17** | any ≥ 14 works; tests use a separate `db_3awedlou_test` schema |
-| Docker | optional | dev database and Mosquitto broker |
+| Docker | optional (dev) | dev database and Mosquitto broker; the prepared production image (`php:8.4-fpm-alpine` + Caddy) has never been built here |
 
 ## Fresh-clone setup
 
@@ -157,6 +159,9 @@ Tracked templates hold placeholders only. Real values belong in `.env` /
 | `MQTT_COMMAND_TTL_SECONDS` | no | `30` | command `expiresAt` |
 | `MQTT_MAX_PAYLOAD_BYTES` | no | `4096` | inbound payload cap |
 | `MQTT_TELEMETRY_MAX_PER_SECOND` | no | `2` | per-machine telemetry budget |
+| `MQTT_CONSUMER_MAX_MESSAGES` | no | `10000` | `app:mqtt:consume` exits cleanly after this many received messages |
+| `AGENT_RETENTION_DAYS` | no | `30` | purge agent conversations inactive for this many days (UTC) |
+| `AGENT_SOFT_DELETE_GRACE_DAYS` | no | `7` | hard-delete a user-soft-deleted conversation after this grace period |
 
 Frontends never receive secrets: web uses `VITE_*`, mobile uses `EXPO_PUBLIC_*`.
 
@@ -201,6 +206,7 @@ decision.
 
 | Method | Path | Auth | Ownership / role | Rate limit |
 |---|---|---|---|---|
+| GET | `/api/health` | public | — | 120 / min per IP |
 | POST | `/api/auth/register` | public | — | 3 / 10 min per IP |
 | POST | `/api/auth/login` | public | — | 5 / 5 min per IP |
 | POST | `/api/auth/token/refresh` | refresh token | token owner | 30 / 5 min per IP |
@@ -221,6 +227,13 @@ decision.
 | DELETE | `/api/agent/conversations` | JWT | **owner only** | — |
 
 No `Cache-Control` streaming endpoints exist; agent answers are non-streaming.
+
+`GET /api/health` checks only that the database answers `SELECT 1` and a JSON
+encoder is available. It returns `200 {"status":"ok"}` or `503
+{"status":"unavailable"}` and deliberately nothing else: no version, host,
+schema, driver or exception text. It is public because a load balancer or
+supervisor must be able to probe it, and rate-limited per client IP so it
+cannot be used to hammer the database.
 
 ### Machines and telemetry
 
@@ -395,17 +408,29 @@ the wire.
 ### Consumer
 
 ```bash
-php bin/console app:mqtt:consume                  # up to 1 h, clean exit
-php bin/console app:mqtt:consume --max-runtime=0  # until SIGINT/SIGTERM
-php bin/console app:mqtt:consume --memory-limit=256M
+php bin/console app:mqtt:consume                       # 1 h / 10 000 messages, clean exit
+php bin/console app:mqtt:consume --max-runtime=0       # until SIGINT/SIGTERM or the stop file
+php bin/console app:mqtt:consume --memory-limit=256M   # exits non-zero at 90% of the limit
+php bin/console app:mqtt:consume --max-messages=5000   # recycle after a bounded batch
+php bin/console app:mqtt:consume --stop-file=var/run/mqtt-consumer.stop
 ```
 
 Subscribes to the three inbound branches only. Per message: parse the topic,
 cap the payload, require a JSON object, require an existing machine (MQTT never
 creates machines), rate-limit telemetry per machine, then hand off to
 `TelemetryProcessor`; clear the EntityManager and health-check the DB. Errors
-are logged metadata-only and counted. Reconnects back off exponentially
-(1 s → 30 s); the command exits non-zero if it can never connect.
+are logged metadata-only and counted. Reconnects back off exponentially with
+FULL jitter (a random wait up to 1 s, 2 s, 4 s … capped at 30 s), so a fleet
+of workers cannot reconnect in lockstep.
+
+A run stops at the first of: `--max-runtime`, `--max-messages`, SIGINT/SIGTERM
+(only where ext-pcntl exists — it does not on Windows) or the portable
+`--stop-file` (default `var/run/mqtt-consumer.stop`; the file is removed when
+consumed, so it stops exactly one run). SIGINT/SIGTERM write that same file and
+interrupt the receive loop, so signals and a supervisor stop the worker the
+same way. Exit codes: `0` for a bounded/clean stop, `1` when MQTT is disabled,
+an option is invalid, the memory high-watermark is hit, the broker was never
+reached, or anything fatal happened — a supervisor can restart on that.
 
 ### Manual broker check (requires a running broker)
 
@@ -469,6 +494,42 @@ verified only with a deterministic stub. Agent HTTP bodies are not logged;
 provider logs are metadata-only. A 3xx provider response is refused rather than
 followed, and an external plain-http `AGENT_BASE_URL` fails before any request.
 
+### Owner-run smoke test (real provider)
+
+`bin/agent-smoke.ps1` drives the real chain — login, then `POST
+/api/agent/chat` — using credentials only from the current shell (never from
+arguments) and prints status codes, reply length and token counts. It never
+prints the access token or the provider key:
+
+```powershell
+$env:SMOKE_EMAIL    = 'smoke-user@example.test'
+$env:SMOKE_PASSWORD = '<that account password>'
+powershell -File bin/agent-smoke.ps1 -BaseUrl http://127.0.0.1:8000
+```
+
+`AGENT_ENABLED=true` and `ANTHROPIC_API_KEY` belong to the BACKEND process
+(`.env.local`), not to the script; a `404 AGENT_DISABLED` or `503
+AGENT_LLM_UNAVAILABLE` means exactly one of them is missing. Exit codes: `0`
+passed, `1` failed, `2` missing `SMOKE_*`. **Prepared, never run:** no live
+provider call or test account was used in this round.
+
+### Retention and privacy
+
+`php bin/console app:agent:purge` hard-deletes conversations whose last activity
+is older than `AGENT_RETENTION_DAYS` and, separately, conversations the user
+soft-deleted more than `AGENT_SOFT_DELETE_GRACE_DAYS` ago. It is GLOBAL across
+all users because retention is a platform rule, not a per-account setting, and
+it prints counts only — never conversation or message content:
+
+```bash
+php bin/console app:agent:purge --dry-run   # DRY RUN conversations=… inactive=… soft_deleted=… messages=…
+php bin/console app:agent:purge             # PURGED  conversations=… inactive=… soft_deleted=… messages=…
+```
+
+Daily token aggregates are kept after a purge, so deleting a conversation can
+never reset usage accounting. Schedule the command once a day and alert on a
+non-zero exit.
+
 ## Time handling
 
 Audit (2026-11-11): every persisted timestamp uses `DateTimeImmutable` and a
@@ -508,10 +569,18 @@ composer validate --no-check-publish
 php bin/console debug:router    # route table
 ```
 
-Current results (2026-11-11, round 4): **168 tests, 936 assertions, 2 skipped**
+Current results (2026-11-11, round 5): **180 tests, 1 324 assertions, 2 skipped**
 (the skipped tests are the real-broker MQTT integration tests). PHPStan: **no
-errors**. `lint:container` and `composer validate` pass. `git diff --check`
-is clean.
+errors**. `lint:container`, `lint:yaml config` and `composer validate` pass.
+Round 5 added coverage for the health route (body, headers, per-IP limit), the
+global retention purge (dry-run and real, with unrelated recent conversations
+kept), the consumer lifecycle (message cap, stop file, disabled broker,
+unreachable broker) and the backoff bounds/jitter.
+
+CI (`.github/workflows/ci.yml`) runs PHP 8.3 (the locked PHPUnit 12.5 requires
+`>=8.3`) against PostgreSQL 17: `composer validate`, `lint:container`,
+`lint:yaml config`, PHPStan, a throwaway JWT pair, database create + migrate,
+then PHPUnit. No test needs a broker or the network.
 
 ## Project structure
 
@@ -520,6 +589,10 @@ is clean.
 ├── bin/                        # console entry + dev-check, check-schema, mqtt-user, phpunit
 ├── compose.yaml                # dev PostgreSQL
 ├── compose.mqtt.yaml           # dev Mosquitto (separate file on purpose)
+├── Dockerfile                  # PREPARED production image: php-fpm + Caddy
+├── compose.prod.yaml           # PREPARED production stack (never started)
+├── deploy/                     # PREPARED Caddyfile + Mosquitto TLS config/ACL
+├── .env.prod.example           # placeholders for production values
 ├── config/                     # Symfony config and firewalls
 ├── docker/                     # initdb SQL + Mosquitto config/acl
 ├── migrations/                 # Doctrine migrations
@@ -587,16 +660,25 @@ of this repository.
 - Broker: TLS on 8883, per-device credentials, no anonymous access, ACL loaded.
 - Rotate every secret that was ever committed (historical `.env`, DB/broker
   credentials and the historical JWT passphrase) before exposing the service.
-- Enable backups and the telemetry pruning command on a schedule.
+- Enable backups, the telemetry pruning command and `app:agent:purge` on a
+  schedule.
+- Production packaging exists as `Dockerfile`, `compose.prod.yaml`,
+  `deploy/Caddyfile` and `deploy/mosquitto/` (TLS on 8883, password file, ACL,
+  no plaintext listener). It is **prepared and never run**: build it on the
+  host, keep `.env.prod`, `config/jwt/prod`, `deploy/mosquitto/passwd` and
+  `deploy/certs` off Git, run `migrate` before `app`/`worker`, and probe
+  `GET /api/health` after the first start.
 - Policies already decided: commands are strictly owner-only (admins keep REST
   reads); mobile rotates refresh tokens, the web uses access-token-only with
   logout on 401. A cookie-based web refresh remains Future.
 
 ## Not run live (honest list)
 
-No live Anthropic call; no physical device; no real MQTT broker/ACL run; no VPS
-or TLS deployment; no browser/device UI verification from this repository;
-migrations were applied to the local test database only.
+No live Anthropic call (`bin/agent-smoke.ps1` is prepared, never run); no
+physical device; no real MQTT broker/ACL run; the production container stack
+was never built or started (no Docker engine, no VPS, no TLS certificate); no
+browser/device UI verification from this repository; migrations were applied
+to the local test database only.
 
 ## Related repositories
 
