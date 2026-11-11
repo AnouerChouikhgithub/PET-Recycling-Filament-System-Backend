@@ -23,6 +23,7 @@ parameters:
     app.agent.base_url_default: 'https://api.anthropic.com'
     app.agent.connect_timeout_default: 5
     app.agent.request_timeout_default: 30
+    app.agent.turn_deadline_default: 45
     # Domain exception → stable API error code + HTTP status.
     # Consumed by App\Api\EventSubscriber\ApiExceptionSubscriber; add new
     # mappings here instead of editing subscriber code.
@@ -182,6 +183,7 @@ services:
             $baseUrl: '%env(default:app.agent.base_url_default:string:AGENT_BASE_URL)%'
             $connectTimeoutSec: '%env(default:app.agent.connect_timeout_default:int:AGENT_CONNECT_TIMEOUT_SEC)%'
             $requestTimeoutSec: '%env(default:app.agent.request_timeout_default:int:AGENT_REQUEST_TIMEOUT_SEC)%'
+            $turnDeadlineSec: '%env(default:app.agent.turn_deadline_default:int:AGENT_TURN_DEADLINE_SEC)%'
 
     # REAL provider (session 2). The TEST environment rebinds this alias to
     # the scripted stub (config/packages/test/services.yaml) so the suite

@@ -144,6 +144,7 @@ Tracked templates hold placeholders only. Real values belong in `.env` /
 | `AGENT_DAILY_TOKEN_CAP` | no | `200000` | per user per UTC day |
 | `AGENT_MSG_MAX_CHARS` | no | `4000` | message length |
 | `AGENT_CONNECT_TIMEOUT_SEC` / `AGENT_REQUEST_TIMEOUT_SEC` | no | `5` / `30` | provider timeouts |
+| `AGENT_TURN_DEADLINE_SEC` | no | `45` | whole-turn budget, checked before every model call; expiry returns the fallback answer |
 | `MQTT_ENABLED` | no | `false` | `true` = real broker publisher |
 | `MQTT_HOST` / `MQTT_PORT` | no | `localhost` / `1883` | broker address |
 | `MQTT_USERNAME` / `MQTT_PASSWORD` | for a live broker | — | **credentials; `.env.local` only** |

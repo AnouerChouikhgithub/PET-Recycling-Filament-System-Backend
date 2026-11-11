@@ -16,6 +16,8 @@ use App\Repository\AgentConversationRepository;
 use App\Repository\AgentMessageRepository;
 use Doctrine\ORM\EntityManagerInterface;
 use Psr\Log\LoggerInterface;
+use Symfony\Component\Clock\ClockInterface;
+use Symfony\Component\Clock\NativeClock;
 
 /**
  * One chat turn:
@@ -56,6 +58,8 @@ final class AgentOrchestrator
 
     private const FALLBACK_FR = "Je n'ai pas pu terminer cette recherche. Veuillez réessayer.";
 
+    private readonly ClockInterface $clock;
+
     public function __construct(
         private readonly LlmClientInterface $llm,
         private readonly ToolRegistry $registry,
@@ -66,7 +70,9 @@ final class AgentOrchestrator
         private readonly AgentConfig $config,
         private readonly TurnGuard $guard,
         private readonly ToolInputValidator $validator,
+        ?ClockInterface $clock = null,
     ) {
+        $this->clock = $clock ?? new NativeClock();
     }
 
     /**
@@ -74,6 +80,8 @@ final class AgentOrchestrator
      */
     public function turn(User $user, ?string $conversationId, string $message): array
     {
+        $turnStartedAt = $this->clock->now();
+
         // Ownership FIRST: a foreign conversation must not even reserve budget.
         $conversation = null === $conversationId
             ? new AgentConversation($user)
@@ -90,7 +98,7 @@ final class AgentOrchestrator
         $spent = ['input' => 0, 'output' => 0];
 
         try {
-            return $this->completeTurn($conversation, $user, $message, $reserve, $reservedAt, $isNew, $spent);
+            return $this->completeTurn($conversation, $user, $message, $reserve, $reservedAt, $turnStartedAt, $isNew, $spent);
         } catch (\Throwable $exception) {
             if ($exception instanceof AgentDailyTokenCapException
                 || $exception instanceof ResourceNotFoundException
@@ -115,7 +123,7 @@ final class AgentOrchestrator
      *
      * @return array{conversation: AgentConversation, assistantMessage: AgentMessage, answer: string, toolCalls: list<array{name: string, summary: string}>, usage: array{input: int, output: int}, toolResults: list<array<string, mixed>>}
      */
-    private function completeTurn(AgentConversation $conversation, User $user, string $message, int $reserve, \DateTimeImmutable $reservedAt, bool $isNewConversation, array &$usageTotal): array
+    private function completeTurn(AgentConversation $conversation, User $user, string $message, int $reserve, \DateTimeImmutable $reservedAt, \DateTimeImmutable $turnStartedAt, bool $isNewConversation, array &$usageTotal): array
     {
         $userMessage = new AgentMessage($conversation, AgentMessage::ROLE_USER, $message);
         $this->em->persist($userMessage);
@@ -145,9 +153,18 @@ final class AgentOrchestrator
 
         $answer = '';
         $rounds = 0;
+        $modelCalls = 0;
+        $deadlineHit = false;
 
         while (true) {
+            if ($this->deadlineReached($turnStartedAt)) {
+                $answer = $this->fallbackFor($message);
+                $deadlineHit = true;
+                break;
+            }
+
             $response = $this->modelCall($llmMessages, $this->registry->definitions(), $usageTotal, $user, $reserve, $reservedAt);
+            ++$modelCalls;
 
             $toolUses = [];
             $textOut = '';
@@ -226,7 +243,7 @@ final class AgentOrchestrator
         // either gets the answer AND correct accounting, or an error with no
         // completed assistant answer (no silently-inconsistent state).
         $assistantMessage = $this->em->wrapInTransaction(
-            function () use ($conversation, $answer, $toolCalls, $usageTotal, $user, $reserve, $reservedAt): AgentMessage {
+            function () use ($conversation, $answer, $toolCalls, $usageTotal, $user, $reserve, $reservedAt, $deadlineHit, $modelCalls): AgentMessage {
                 $assistantMessage = new AgentMessage($conversation, AgentMessage::ROLE_ASSISTANT, $answer);
                 $assistantMessage->setToolCalls($toolCalls);
                 $assistantMessage->setUsage($usageTotal['input'], $usageTotal['output']);
@@ -234,7 +251,13 @@ final class AgentOrchestrator
                 $conversation->touch();
                 $this->em->flush();
 
-                $this->guard->settleTurn($user, $usageTotal, $reserve, $reservedAt);
+                if ($deadlineHit && 0 === $modelCalls) {
+                    // The deadline expired before any provider work: refund
+                    // the whole reserve rather than billing a floor.
+                    $this->guard->refundFailedTurn($user, $reserve, 0, $reservedAt);
+                } else {
+                    $this->guard->settleTurn($user, $usageTotal, $reserve, $reservedAt);
+                }
 
                 return $assistantMessage;
             },
@@ -246,6 +269,7 @@ final class AgentOrchestrator
             'message_id' => $assistantMessage->getId()->toRfc4122(),
             'tool_calls' => \count($toolCalls),
             'tool_rounds' => $rounds,
+            'deadline_hit' => $deadlineHit,
             'usage_input' => $usageTotal['input'],
             'usage_output' => $usageTotal['output'],
         ]);
@@ -389,6 +413,13 @@ final class AgentOrchestrator
         $clamped = function_exists('mb_substr') ? mb_substr($message, 0, 80) : substr($message, 0, 80);
 
         return trim($clamped);
+    }
+
+    private function deadlineReached(\DateTimeImmutable $turnStartedAt): bool
+    {
+        $deadline = $turnStartedAt->modify(sprintf('+%d seconds', max(0, $this->config->turnDeadlineSec)));
+
+        return $this->clock->now() >= $deadline;
     }
 
     /**

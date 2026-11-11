@@ -38,6 +38,8 @@ final class AgentConfig
         public readonly string $baseUrl = self::DEFAULT_BASE_URL,
         public readonly int $connectTimeoutSec = self::DEFAULT_CONNECT_TIMEOUT_SEC,
         public readonly int $requestTimeoutSec = self::DEFAULT_REQUEST_TIMEOUT_SEC,
+        /** Whole-turn budget checked before every model call. */
+        public readonly int $turnDeadlineSec = 45,
     ) {
     }
 
