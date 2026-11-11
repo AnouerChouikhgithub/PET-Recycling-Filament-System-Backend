@@ -112,6 +112,7 @@ Tracked templates hold placeholders only. Real values belong in `.env` /
 |---|---|---|---|
 | `APP_ENV` | no | `dev` | `dev` \| `prod` \| `test` |
 | `APP_SECRET` | yes | — | framework secret (`php bin/console secret:generate`) |
+| `APP_SHARE_DIR` | no | `var/share` | shared directory for framework files |
 | `DATABASE_URL` | yes | local PostgreSQL DSN | dev/test database |
 | `JWT_SECRET_KEY` / `JWT_PUBLIC_KEY` | yes | `config/jwt/*.pem` | RS256 key paths (git-ignored) |
 | `JWT_PASSPHRASE` | no | empty in dev | key passphrase |
