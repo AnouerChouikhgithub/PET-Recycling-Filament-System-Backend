@@ -23,3 +23,7 @@ framework:
             policy: 'sliding_window'
             limit: 30
             interval: '5 minutes'
+        health:
+            policy: 'sliding_window'
+            limit: 120
+            interval: '1 minute'
