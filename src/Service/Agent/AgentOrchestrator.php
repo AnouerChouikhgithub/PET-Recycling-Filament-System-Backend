@@ -80,7 +80,7 @@ final class AgentOrchestrator
             : $this->ownedConversation($conversationId, $user);
 
         $reserve = $this->config->reserveEstimateTokens();
-        $this->guard->reserveTurn($user); // throws AgentDailyTokenCapException when the cap is full
+        $reservedAt = $this->guard->reserveTurn($user); // throws AgentDailyTokenCapException when the cap is full
         $isNew = null === $conversationId;
 
         // Provider-reported usage of every COMPLETED call in this turn. The
@@ -90,7 +90,7 @@ final class AgentOrchestrator
         $spent = ['input' => 0, 'output' => 0];
 
         try {
-            return $this->completeTurn($conversation, $user, $message, $reserve, $isNew, $spent);
+            return $this->completeTurn($conversation, $user, $message, $reserve, $reservedAt, $isNew, $spent);
         } catch (\Throwable $exception) {
             if ($exception instanceof AgentDailyTokenCapException
                 || $exception instanceof ResourceNotFoundException
@@ -103,7 +103,7 @@ final class AgentOrchestrator
             // a post-model persistence failure. Bill exactly what the provider
             // reported - 0 when nothing was sent - and refund the estimate
             // rest. No floor here: the turn produced nothing to charge for.
-            $this->guard->refundFailedTurn($user, $reserve, $spent['input'] + $spent['output']);
+            $this->guard->refundFailedTurn($user, $reserve, $spent['input'] + $spent['output'], $reservedAt);
             throw $exception;
         }
     }
@@ -115,7 +115,7 @@ final class AgentOrchestrator
      *
      * @return array{conversation: AgentConversation, assistantMessage: AgentMessage, answer: string, toolCalls: list<array{name: string, summary: string}>, usage: array{input: int, output: int}, toolResults: list<array<string, mixed>>}
      */
-    private function completeTurn(AgentConversation $conversation, User $user, string $message, int $reserve, bool $isNewConversation, array &$usageTotal): array
+    private function completeTurn(AgentConversation $conversation, User $user, string $message, int $reserve, \DateTimeImmutable $reservedAt, bool $isNewConversation, array &$usageTotal): array
     {
         $userMessage = new AgentMessage($conversation, AgentMessage::ROLE_USER, $message);
         $this->em->persist($userMessage);
@@ -147,7 +147,7 @@ final class AgentOrchestrator
         $rounds = 0;
 
         while (true) {
-            $response = $this->modelCall($llmMessages, $this->registry->definitions(), $usageTotal, $user, $reserve);
+            $response = $this->modelCall($llmMessages, $this->registry->definitions(), $usageTotal, $user, $reserve, $reservedAt);
 
             $toolUses = [];
             $textOut = '';
@@ -226,7 +226,7 @@ final class AgentOrchestrator
         // either gets the answer AND correct accounting, or an error with no
         // completed assistant answer (no silently-inconsistent state).
         $assistantMessage = $this->em->wrapInTransaction(
-            function () use ($conversation, $answer, $toolCalls, $usageTotal, $user, $reserve): AgentMessage {
+            function () use ($conversation, $answer, $toolCalls, $usageTotal, $user, $reserve, $reservedAt): AgentMessage {
                 $assistantMessage = new AgentMessage($conversation, AgentMessage::ROLE_ASSISTANT, $answer);
                 $assistantMessage->setToolCalls($toolCalls);
                 $assistantMessage->setUsage($usageTotal['input'], $usageTotal['output']);
@@ -234,7 +234,7 @@ final class AgentOrchestrator
                 $conversation->touch();
                 $this->em->flush();
 
-                $this->guard->settleTurn($user, $usageTotal, $reserve);
+                $this->guard->settleTurn($user, $usageTotal, $reserve, $reservedAt);
 
                 return $assistantMessage;
             },
@@ -273,7 +273,7 @@ final class AgentOrchestrator
      *
      * @return array{role: 'assistant', content: list<array<string, mixed>>, usage: array{input: int, output: int}}
      */
-    private function modelCall(array $llmMessages, array $tools, array &$usageTotal, User $user, int $reserve): array
+    private function modelCall(array $llmMessages, array $tools, array &$usageTotal, User $user, int $reserve, \DateTimeImmutable $reservedAt): array
     {
         try {
             $response = $this->llm->complete($llmMessages, $tools);
@@ -284,9 +284,9 @@ final class AgentOrchestrator
             // rest of the estimate.
             $actual = $usageTotal['input'] + $usageTotal['output'];
             if ($failure instanceof AgentLlmNotAttemptedException) {
-                $this->guard->refundFailedTurn($user, $reserve, $actual);
+                $this->guard->refundFailedTurn($user, $reserve, $actual, $reservedAt);
             } else {
-                $this->guard->reconcileFailedTurn($user, $reserve, $actual);
+                $this->guard->reconcileFailedTurn($user, $reserve, $actual, $reservedAt);
             }
 
             throw new ReconciledLlmFailure();
