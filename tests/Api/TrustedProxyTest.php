@@ -19,14 +19,14 @@ final class TrustedProxyTest extends KernelTestCase
 
     protected function tearDown(): void
     {
-        Request::setTrustedProxies([], -1);
+        Request::setTrustedProxies([], 0);
         unset($_ENV['TRUSTED_PROXIES'], $_SERVER['TRUSTED_PROXIES']);
         parent::tearDown();
     }
 
     public function testForwardedForIsIgnoredWithoutTrustedProxies(): void
     {
-        Request::setTrustedProxies([], -1);
+        Request::setTrustedProxies([], 0);
 
         $request = $this->requestFromProxy('198.51.100.10');
 
@@ -39,6 +39,9 @@ final class TrustedProxyTest extends KernelTestCase
         $_ENV['TRUSTED_PROXIES'] = self::PROXY;
         $_SERVER['TRUSTED_PROXIES'] = self::PROXY;
         self::bootKernel();
+        $request = $this->requestFromProxy('198.51.100.10');
+        // The kernel's configuration must already trust the proxy/header.
+        self::assertSame('198.51.100.10', $request->getClientIp());
 
         $first = $this->requestFromProxy('198.51.100.10');
         $second = $this->requestFromProxy('198.51.100.11');
