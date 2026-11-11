@@ -73,6 +73,23 @@ final class IotApiTest extends WebTestCase
         self::assertSame(192.4, $this->json()['data'][0]['temperature']);
     }
 
+    public function testDeviceRecordedAtOffsetIsNormalizedToUtc(): void
+    {
+        $machine = $this->createMachine('TZ Unit', 'tz-unit-'.substr(Uuid::v7()->toBase32(), 0, 8));
+
+        $this->client->request('POST', '/api/machines/'.$machine->getId()->toRfc4122().'/telemetry', [], [], ['CONTENT_TYPE' => 'application/json', 'HTTP_X_DEVICE_TOKEN' => $this->issueDeviceToken($machine)], (string) json_encode([
+            'temperature' => 200.0,
+            'recordedAt' => '2026-01-01T00:00:00+02:00',
+        ]));
+
+        self::assertResponseStatusCodeSame(201);
+        self::assertSame(
+            '2025-12-31T22:00:00+00:00',
+            $this->json()['data']['recordedAt'],
+            'an offset timestamp is stored and returned as the same UTC instant',
+        );
+    }
+
     public function testTelemetryIngestUpdatesMachineStatus(): void
     {
         $machine = $this->createMachine('Status Unit', 'status-unit-'.substr(Uuid::v7()->toBase32(), 0, 8));

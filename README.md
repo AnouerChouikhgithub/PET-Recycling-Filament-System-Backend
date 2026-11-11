@@ -462,6 +462,31 @@ Provider behaviour, real token accounting and French/English answer quality are
 verified only with a deterministic stub. Agent HTTP bodies are not logged;
 provider logs are metadata-only.
 
+## Time handling
+
+Audit (2026-11-11): every persisted timestamp uses `DateTimeImmutable` and a
+PostgreSQL `TIMESTAMP WITHOUT TIME ZONE` column interpreted as **UTC**.
+`Kernel::__construct()` enforces `date_default_timezone_set('UTC')`, so a
+host configured for another zone cannot silently shift stored data. API
+serializers use `DateTimeInterface::ATOM`, which always carries an explicit
+offset (`+00:00`).
+
+* Device `recordedAt` values are converted to UTC before storage; an offset
+  such as `+02:00` no longer loses the instant (regression test in
+  `IotApiTest`). Values more than 5 minutes in the future are rejected.
+* Daily token accounting keys rows by the UTC date; reserve/settle/refund all
+  use the reservation timestamp, including across UTC midnight.
+* Telemetry pruning parses its cutoff in UTC; refresh-token expiry queries
+  compare explicit UTC `now` values.
+* `time()` is used only for elapsed/Retry-After seconds, never to build a
+  stored date. There is no `date()` or `strtotime()` date construction in
+  application code (the prune option help text merely mentions
+  `strtotime`-style input).
+
+Still unverified: the real ESP32 RTC/clock source and device clock drift; the
+backend can reject implausible future samples but cannot prove a past
+timestamp came from a calibrated clock.
+
 ## Tests, lint and static analysis
 
 The suite needs the local PostgreSQL test database from `.env.test`

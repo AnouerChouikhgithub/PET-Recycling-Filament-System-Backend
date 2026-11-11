@@ -209,13 +209,17 @@ final class TelemetryProcessor
                 throw $this->typeViolation('recordedAt', 'ISO-8601 string');
             }
             try {
-                $recordedAt = new \DateTimeImmutable($payload['recordedAt']);
+                // Normalize the INSTANT to UTC: PostgreSQL stores a naive
+                // timestamp, so keeping the device's offset would silently
+                // shift the sample (e.g. +02:00 stored as wall-clock UTC).
+                $recordedAt = (new \DateTimeImmutable($payload['recordedAt']))
+                    ->setTimezone(new \DateTimeZone('UTC'));
             } catch (\Exception) {
                 throw $this->typeViolation('recordedAt', 'ISO-8601 string');
             }
             // Devices with drifting clocks must not poison the history with
             // samples from the far future (UTC comparisons; small skew OK).
-            if ($recordedAt > (new \DateTimeImmutable('now'))->add(new \DateInterval(self::RECORDED_AT_FUTURE_TOLERANCE))) {
+            if ($recordedAt > (new \DateTimeImmutable('now', new \DateTimeZone('UTC')))->add(new \DateInterval(self::RECORDED_AT_FUTURE_TOLERANCE))) {
                 throw new ValidationException('Telemetry payload is invalid.', [
                     'recordedAt' => ['This value must not be in the far future.'],
                 ]);
