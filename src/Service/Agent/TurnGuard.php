@@ -8,6 +8,8 @@ use App\Api\Exception\AgentDailyTokenCapException;
 use App\Entity\User;
 use App\Repository\AgentTokenUsageRepository;
 use Psr\Cache\CacheItemPoolInterface;
+use Symfony\Component\Clock\ClockInterface;
+use Symfony\Component\Clock\NativeClock;
 use Symfony\Component\RateLimiter\RateLimiterFactory;
 use Symfony\Component\RateLimiter\Storage\CacheStorage;
 
@@ -51,11 +53,16 @@ final class TurnGuard
 
     private RateLimiterFactory $rateLimiter;
 
+    private readonly ClockInterface $clock;
+
     public function __construct(
         private readonly AgentConfig $config,
         private readonly AgentTokenUsageRepository $usage,
         CacheItemPoolInterface $limiterPool,
+        ?ClockInterface $clock = null,
     ) {
+        $this->clock = $clock ?? new NativeClock();
+
         // Per-user sliding window built from env-resolved values (the token
         // cap is the durable limit; the message window is rate only).
         //
@@ -94,18 +101,21 @@ final class TurnGuard
      *
      * @throws AgentDailyTokenCapException when today's remaining budget is below the estimate
      */
-    public function reserveTurn(User $user): void
+    public function reserveTurn(User $user): \DateTimeImmutable
     {
+        $reservedAt = $this->now();
         $accepted = $this->usage->reserveBudget(
             $user,
             $this->config->reserveEstimateTokens(),
             $this->config->dailyTokenCap,
-            new \DateTimeImmutable(),
+            $reservedAt,
         );
 
         if (!$accepted) {
             throw new AgentDailyTokenCapException();
         }
+
+        return $reservedAt;
     }
 
     /**
@@ -115,9 +125,9 @@ final class TurnGuard
      * @param array<string, mixed>|null $usage  provider-reported {input, output}
      * @param int                       $reserve the estimate reserveTurn() took
      */
-    public function settleTurn(User $user, ?array $usage, int $reserve): void
+    public function settleTurn(User $user, ?array $usage, int $reserve, \DateTimeImmutable $reservedAt): void
     {
-        $this->usage->settleBudget($user, $this->delta($usage, $reserve), new \DateTimeImmutable());
+        $this->usage->settleBudget($user, $this->delta($usage, $reserve), $reservedAt);
     }
 
     /**
@@ -130,11 +140,11 @@ final class TurnGuard
      * @param int $reserve the estimate reserveTurn() took
      * @param int $tokens  actual usage accumulated by COMPLETED provider calls
      */
-    public function reconcileFailedTurn(User $user, int $reserve, int $tokens = 0): void
+    public function reconcileFailedTurn(User $user, int $reserve, int $tokens, \DateTimeImmutable $reservedAt): void
     {
         $billed = $tokens + self::MISSING_USAGE_ESTIMATE;
 
-        $this->usage->settleBudget($user, $billed - $reserve, new \DateTimeImmutable());
+        $this->usage->settleBudget($user, $billed - $reserve, $reservedAt);
     }
 
     /**
@@ -151,9 +161,9 @@ final class TurnGuard
      * @param int $reserve the estimate reserveTurn() took
      * @param int $tokens  actual usage of COMPLETED provider calls (normally 0)
      */
-    public function refundFailedTurn(User $user, int $reserve, int $tokens = 0): void
+    public function refundFailedTurn(User $user, int $reserve, int $tokens, \DateTimeImmutable $reservedAt): void
     {
-        $this->usage->settleBudget($user, $tokens - $reserve, new \DateTimeImmutable());
+        $this->usage->settleBudget($user, $tokens - $reserve, $reservedAt);
     }
 
     /** TODAY's stored usage (tests, admin queries). */
@@ -164,7 +174,7 @@ final class TurnGuard
 
     private function usageRowFor(User $user): ?\App\Entity\AgentTokenUsage
     {
-        $today = (new \DateTimeImmutable())->setTimezone(new \DateTimeZone('UTC'))->format('Y-m-d');
+        $today = $this->now()->setTimezone(new \DateTimeZone('UTC'))->format('Y-m-d');
 
         $row = $this->usage->createQueryBuilder('u')
             ->where('u.user = :user')
@@ -195,6 +205,11 @@ final class TurnGuard
         }
 
         return $billed - $reserve;
+    }
+
+    private function now(): \DateTimeImmutable
+    {
+        return $this->clock->now();
     }
 
     private function key(User $user): string

@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace App\Tests\IoT;
 
 use App\Entity\Machine;
+use App\Entity\MachineCommandAudit;
+use App\Entity\MachineCommandType;
 use App\Entity\MachineStatus;
 use App\Repository\MachineRepository;
 use App\Service\IoT\MqttConfig;
@@ -255,7 +257,100 @@ final class MqttMessageHandlerTest extends KernelTestCase
         self::assertArrayNotHasKey('failed', $this->handler->counters());
     }
 
+    public function testMatchingCommandAckMarksTheAuditRow(): void
+    {
+        $machine = $this->createMachine('ack');
+        $audit = $this->createAudit($machine);
+        $id = $audit->getId()->toRfc4122();
+
+        $this->handler->handle(
+            $this->topics->events($machine->getIdentifier()),
+            (string) json_encode(['type' => 'command_ack', 'commandId' => $id, 'accepted' => true, 'reason' => 0]),
+        );
+
+        $row = $this->em->getRepository(MachineCommandAudit::class)->find($id);
+        self::assertInstanceOf(MachineCommandAudit::class, $row);
+        self::assertTrue($row->isAcknowledged(), 'a real matching ack sets the acknowledgement');
+        self::assertSame('accepted', $row->getAckStatus());
+        self::assertInstanceOf(\DateTimeImmutable::class, $row->getAcknowledgedAt());
+    }
+
+    public function testRejectedCommandAckIsRecordedAsRejected(): void
+    {
+        $machine = $this->createMachine('nack');
+        $audit = $this->createAudit($machine);
+
+        $this->handler->handle(
+            $this->topics->events($machine->getIdentifier()),
+            (string) json_encode(['type' => 'command_ack', 'commandId' => $audit->getId()->toRfc4122(), 'accepted' => false, 'reason' => 3]),
+        );
+
+        $row = $this->em->getRepository(MachineCommandAudit::class)->find($audit->getId());
+        self::assertInstanceOf(MachineCommandAudit::class, $row);
+        self::assertSame('rejected', $row->getAckStatus());
+    }
+
+    public function testAckForAnotherMachineIsIgnored(): void
+    {
+        $ownerMachine = $this->createMachine('ack-a');
+        $otherMachine = $this->createMachine('ack-b');
+        $audit = $this->createAudit($ownerMachine);
+
+        $this->handler->handle(
+            $this->topics->events($otherMachine->getIdentifier()),
+            (string) json_encode(['type' => 'command_ack', 'commandId' => $audit->getId()->toRfc4122(), 'accepted' => true, 'reason' => 0]),
+        );
+
+        $row = $this->em->getRepository(MachineCommandAudit::class)->find($audit->getId());
+        self::assertInstanceOf(MachineCommandAudit::class, $row);
+        self::assertFalse($row->isAcknowledged(), 'identity comes from the topic; a foreign ack cannot close this command');
+    }
+
+    public function testUnknownAndMalformedAcksAreIgnoredWithoutFailure(): void
+    {
+        $machine = $this->createMachine('ack-bad');
+        $topic = $this->topics->events($machine->getIdentifier());
+
+        $this->handler->handle($topic, (string) json_encode(['type' => 'command_ack', 'commandId' => Uuid::v7()->toRfc4122(), 'accepted' => true, 'reason' => 0]));
+        $this->handler->handle($topic, '{"type":"command_ack"}');
+        $this->handler->handle($topic, '{"type":"command_ack","commandId":"not-a-uuid","accepted":true}');
+        $this->handler->handle($topic, '{"type":"command_ack","commandId":"'.Uuid::v7()->toRfc4122().'","accepted":"yes"}');
+
+        self::assertArrayNotHasKey('failed', $this->handler->counters(), 'bad acks never crash the consumer');
+        self::assertGreaterThanOrEqual(1, $this->handler->counters()['command_ack_ignored'] ?? 0, 'unknown command ids are ignored');
+        self::assertGreaterThanOrEqual(3, $this->handler->counters()['dropped'] ?? 0, 'malformed acks are dropped');
+    }
+
+    public function testDuplicateAckKeepsTheFirstTerminalState(): void
+    {
+        $machine = $this->createMachine('ack-dup');
+        $audit = $this->createAudit($machine);
+        $topic = $this->topics->events($machine->getIdentifier());
+        $payload = (string) json_encode(['type' => 'command_ack', 'commandId' => $audit->getId()->toRfc4122(), 'accepted' => true, 'reason' => 0]);
+
+        $this->handler->handle($topic, $payload);
+        $first = $this->em->getRepository(MachineCommandAudit::class)->find($audit->getId());
+        self::assertInstanceOf(MachineCommandAudit::class, $first);
+        $firstAt = $first->getAcknowledgedAt()?->format(\DateTimeInterface::ATOM);
+
+        $this->handler->handle($topic, (string) json_encode(['type' => 'command_ack', 'commandId' => $audit->getId()->toRfc4122(), 'accepted' => false, 'reason' => 8]));
+
+        $second = $this->em->getRepository(MachineCommandAudit::class)->find($audit->getId());
+        self::assertInstanceOf(MachineCommandAudit::class, $second);
+        self::assertSame('accepted', $second->getAckStatus(), 'a duplicate must not rewrite the terminal state');
+        self::assertSame($firstAt, $second->getAcknowledgedAt()?->format(\DateTimeInterface::ATOM));
+    }
+
     // ---------------------------------------------------------------- helpers
+
+    private function createAudit(Machine $machine): MachineCommandAudit
+    {
+        $audit = new MachineCommandAudit($machine, null, MachineCommandType::Start, null);
+        $this->em->persist($audit);
+        $this->em->flush();
+
+        return $audit;
+    }
 
     private function createMachine(string $suffix, MachineStatus $status = MachineStatus::Offline): Machine
     {

@@ -7,6 +7,7 @@ namespace App\Service\Agent;
 use App\Api\Exception\AgentDailyTokenCapException;
 use App\Api\Exception\AgentLlmNotAttemptedException;
 use App\Api\Exception\AgentLlmUnavailableException;
+use App\Api\Exception\ReconciledLlmFailure;
 use App\Api\Exception\ResourceNotFoundException;
 use App\Entity\AgentConversation;
 use App\Entity\AgentMessage;
@@ -15,14 +16,8 @@ use App\Repository\AgentConversationRepository;
 use App\Repository\AgentMessageRepository;
 use Doctrine\ORM\EntityManagerInterface;
 use Psr\Log\LoggerInterface;
-
-/**
- * Internal marker: the model call already reconciled the reservation in
- * modelCall(); the outer catch must not bill twice.
- */
-final class ReconciledLlmFailure extends AgentLlmUnavailableException
-{
-}
+use Symfony\Component\Clock\ClockInterface;
+use Symfony\Component\Clock\NativeClock;
 
 /**
  * One chat turn:
@@ -52,12 +47,18 @@ final class ReconciledLlmFailure extends AgentLlmUnavailableException
  *   - every failure still bills whatever COMPLETED calls really reported.
  *
  * Logging: agent channel, METADATA ONLY (ids, tool names, counts) - never
- * message content or tool payloads (docs/ai-agent-test-plan.md T7.3).
+ * message content or tool payloads.
  */
 final class AgentOrchestrator
 {
     /** Hard byte bound for ONE tool_result payload. */
     public const TOOL_RESULT_MAX_BYTES = 8000;
+
+    private const FALLBACK_EN = "I couldn't complete that lookup. Please try again.";
+
+    private const FALLBACK_FR = "Je n'ai pas pu terminer cette recherche. Veuillez réessayer.";
+
+    private readonly ClockInterface $clock;
 
     public function __construct(
         private readonly LlmClientInterface $llm,
@@ -69,7 +70,9 @@ final class AgentOrchestrator
         private readonly AgentConfig $config,
         private readonly TurnGuard $guard,
         private readonly ToolInputValidator $validator,
+        ?ClockInterface $clock = null,
     ) {
+        $this->clock = $clock ?? new NativeClock();
     }
 
     /**
@@ -77,13 +80,15 @@ final class AgentOrchestrator
      */
     public function turn(User $user, ?string $conversationId, string $message): array
     {
+        $turnStartedAt = $this->clock->now();
+
         // Ownership FIRST: a foreign conversation must not even reserve budget.
         $conversation = null === $conversationId
             ? new AgentConversation($user)
             : $this->ownedConversation($conversationId, $user);
 
         $reserve = $this->config->reserveEstimateTokens();
-        $this->guard->reserveTurn($user); // throws AgentDailyTokenCapException when the cap is full
+        $reservedAt = $this->guard->reserveTurn($user); // throws AgentDailyTokenCapException when the cap is full
         $isNew = null === $conversationId;
 
         // Provider-reported usage of every COMPLETED call in this turn. The
@@ -93,7 +98,7 @@ final class AgentOrchestrator
         $spent = ['input' => 0, 'output' => 0];
 
         try {
-            return $this->completeTurn($conversation, $user, $message, $reserve, $isNew, $spent);
+            return $this->completeTurn($conversation, $user, $message, $reserve, $reservedAt, $turnStartedAt, $isNew, $spent);
         } catch (\Throwable $exception) {
             if ($exception instanceof AgentDailyTokenCapException
                 || $exception instanceof ResourceNotFoundException
@@ -106,7 +111,7 @@ final class AgentOrchestrator
             // a post-model persistence failure. Bill exactly what the provider
             // reported - 0 when nothing was sent - and refund the estimate
             // rest. No floor here: the turn produced nothing to charge for.
-            $this->guard->refundFailedTurn($user, $reserve, $spent['input'] + $spent['output']);
+            $this->guard->refundFailedTurn($user, $reserve, $spent['input'] + $spent['output'], $reservedAt);
             throw $exception;
         }
     }
@@ -118,7 +123,7 @@ final class AgentOrchestrator
      *
      * @return array{conversation: AgentConversation, assistantMessage: AgentMessage, answer: string, toolCalls: list<array{name: string, summary: string}>, usage: array{input: int, output: int}, toolResults: list<array<string, mixed>>}
      */
-    private function completeTurn(AgentConversation $conversation, User $user, string $message, int $reserve, bool $isNewConversation, array &$usageTotal): array
+    private function completeTurn(AgentConversation $conversation, User $user, string $message, int $reserve, \DateTimeImmutable $reservedAt, \DateTimeImmutable $turnStartedAt, bool $isNewConversation, array &$usageTotal): array
     {
         $userMessage = new AgentMessage($conversation, AgentMessage::ROLE_USER, $message);
         $this->em->persist($userMessage);
@@ -148,72 +153,99 @@ final class AgentOrchestrator
 
         $answer = '';
         $rounds = 0;
+        $modelCalls = 0;
+        $deadlineHit = false;
 
         while (true) {
-            $response = $this->modelCall($llmMessages, $this->registry->definitions(), $usageTotal, $user, $reserve);
+            if ($this->deadlineReached($turnStartedAt)) {
+                $answer = $this->fallbackFor($message);
+                $deadlineHit = true;
+                break;
+            }
 
-            $toolUse = null;
+            $response = $this->modelCall($llmMessages, $this->registry->definitions(), $usageTotal, $user, $reserve, $reservedAt);
+            ++$modelCalls;
+
+            $toolUses = [];
             $textOut = '';
             foreach ($response['content'] as $block) {
                 if ('text' === ($block['type'] ?? null)) {
                     $textOut .= (string) ($block['text'] ?? '');
                 } elseif ('tool_use' === ($block['type'] ?? null)) {
-                    $toolUse = $block;
+                    $toolUses[] = $block;
                 }
             }
 
-            if (null === $toolUse) {
+            if ([] === $toolUses) {
                 $answer = $textOut;
                 $llmMessages[] = ['role' => 'assistant', 'content' => $response['content']];
                 break;
-            }
-
-            ++$rounds;
-            if ($rounds > $this->config->maxToolRounds) {
-                // Round cap: force a text answer from what is known. The
-                // tool call is NEVER executed beyond the budget.
-                $answer = $textOut;
-                $llmMessages[] = ['role' => 'assistant', 'content' => $response['content']];
-                break;
-            }
-
-            $toolName = (string) ($toolUse['name'] ?? '');
-            $toolUseId = (string) ($toolUse['id'] ?? '');
-            if ('' === $toolUseId) {
-                // Never crash the loop on a provider id gap: refuse as DATA.
-                $toolUseId = 'malformed';
             }
 
             $llmMessages[] = ['role' => 'assistant', 'content' => $response['content']];
+            $resultBlocks = [];
+            $toolRoundLimitReached = false;
 
-            if (!$this->registry->has($toolName)) {
-                // Unknown tool: report back as DATA, never execute (T2.2).
-                $result = ['ok' => false, 'code' => 'UNKNOWN_TOOL'];
-                $toolCalls[] = ['name' => $toolName, 'summary' => 'unknown tool refused'];
-            } else {
-                $result = $this->runTool($toolName, \is_array($toolUse['input'] ?? null) ? $toolUse['input'] : []);
-                $toolCalls[] = ['name' => $toolName, 'summary' => $this->summarize($toolName, $result)];
+            // One model response is one tool round, regardless of how many
+            // tools it asks for. Every call in the same response shares the
+            // same budget decision.
+            ++$rounds;
+
+            foreach ($toolUses as $toolUse) {
+                $toolName = (string) ($toolUse['name'] ?? '');
+                $toolUseId = (string) ($toolUse['id'] ?? '');
+                if ('' === $toolUseId) {
+                    // Never crash the loop on a provider id gap: refuse as DATA.
+                    $toolUseId = 'malformed';
+                }
+
+                if ($rounds > $this->config->maxToolRounds) {
+                    // Every provider call still gets a result, but calls beyond
+                    // the budget are never executed.
+                    $toolRoundLimitReached = true;
+                    $result = ['ok' => false, 'code' => 'TOOL_ROUND_LIMIT'];
+                    $summary = 'tool round limit reached';
+                } elseif (!$this->registry->has($toolName)) {
+                    // Unknown tool: report back as DATA, never execute (T2.2).
+                    $result = ['ok' => false, 'code' => 'UNKNOWN_TOOL'];
+                    $summary = 'unknown tool refused';
+                } else {
+                    $result = $this->runTool($toolName, \is_array($toolUse['input'] ?? null) ? $toolUse['input'] : []);
+                    $summary = $this->summarize($toolName, $result);
+                }
+
+                $result = $this->clampResult($result);
+                $toolCalls[] = ['name' => $toolName, 'summary' => $summary];
+                $toolResults[] = $result;
+                $resultBlocks[] = ['id' => $toolUseId, 'name' => $toolName, 'result' => $result];
+
+                $this->agentLogger->info('agent.tool', [
+                    'user_id' => $user->getId()->toRfc4122(),
+                    'conversation_id' => $conversation->getId()->toRfc4122(),
+                    'tool' => $toolName,
+                    'round' => $rounds,
+                    'ok' => (bool) ($result['ok'] ?? false),
+                ]);
             }
 
-            $result = $this->clampResult($result);
-            $toolResults[] = $result;
+            $llmMessages[] = MessagesContentNormalizer::toolResults($resultBlocks);
+            if ($toolRoundLimitReached) {
+                // The cap means the turn did NOT finish. Any text in the
+                // capped response is partial filler, never a final answer.
+                $answer = $this->fallbackFor($message);
+                break;
+            }
+        }
 
-            $this->agentLogger->info('agent.tool', [
-                'user_id' => $user->getId()->toRfc4122(),
-                'conversation_id' => $conversation->getId()->toRfc4122(),
-                'tool' => $toolName,
-                'round' => $rounds,
-                'ok' => (bool) ($result['ok'] ?? false),
-            ]);
-
-            $llmMessages[] = MessagesContentNormalizer::toolResult($toolUseId, $toolName, $result);
+        if ('' === trim($answer)) {
+            $answer = $this->fallbackFor($message);
         }
 
         // Assistant message + REAL usage settle commit atomically: the client
         // either gets the answer AND correct accounting, or an error with no
         // completed assistant answer (no silently-inconsistent state).
         $assistantMessage = $this->em->wrapInTransaction(
-            function () use ($conversation, $answer, $toolCalls, $usageTotal, $user, $reserve): AgentMessage {
+            function () use ($conversation, $answer, $toolCalls, $usageTotal, $user, $reserve, $reservedAt, $deadlineHit, $modelCalls): AgentMessage {
                 $assistantMessage = new AgentMessage($conversation, AgentMessage::ROLE_ASSISTANT, $answer);
                 $assistantMessage->setToolCalls($toolCalls);
                 $assistantMessage->setUsage($usageTotal['input'], $usageTotal['output']);
@@ -221,7 +253,13 @@ final class AgentOrchestrator
                 $conversation->touch();
                 $this->em->flush();
 
-                $this->guard->settleTurn($user, $usageTotal, $reserve);
+                if ($deadlineHit && 0 === $modelCalls) {
+                    // The deadline expired before any provider work: refund
+                    // the whole reserve rather than billing a floor.
+                    $this->guard->refundFailedTurn($user, $reserve, 0, $reservedAt);
+                } else {
+                    $this->guard->settleTurn($user, $usageTotal, $reserve, $reservedAt);
+                }
 
                 return $assistantMessage;
             },
@@ -231,7 +269,9 @@ final class AgentOrchestrator
             'user_id' => $user->getId()->toRfc4122(),
             'conversation_id' => $conversation->getId()->toRfc4122(),
             'message_id' => $assistantMessage->getId()->toRfc4122(),
-            'tool_rounds' => \count($toolCalls),
+            'tool_calls' => \count($toolCalls),
+            'tool_rounds' => $rounds,
+            'deadline_hit' => $deadlineHit,
             'usage_input' => $usageTotal['input'],
             'usage_output' => $usageTotal['output'],
         ]);
@@ -259,7 +299,7 @@ final class AgentOrchestrator
      *
      * @return array{role: 'assistant', content: list<array<string, mixed>>, usage: array{input: int, output: int}}
      */
-    private function modelCall(array $llmMessages, array $tools, array &$usageTotal, User $user, int $reserve): array
+    private function modelCall(array $llmMessages, array $tools, array &$usageTotal, User $user, int $reserve, \DateTimeImmutable $reservedAt): array
     {
         try {
             $response = $this->llm->complete($llmMessages, $tools);
@@ -270,9 +310,9 @@ final class AgentOrchestrator
             // rest of the estimate.
             $actual = $usageTotal['input'] + $usageTotal['output'];
             if ($failure instanceof AgentLlmNotAttemptedException) {
-                $this->guard->refundFailedTurn($user, $reserve, $actual);
+                $this->guard->refundFailedTurn($user, $reserve, $actual, $reservedAt);
             } else {
-                $this->guard->reconcileFailedTurn($user, $reserve, $actual);
+                $this->guard->reconcileFailedTurn($user, $reserve, $actual, $reservedAt);
             }
 
             throw new ReconciledLlmFailure();
@@ -305,7 +345,16 @@ final class AgentOrchestrator
             return ['ok' => false, 'code' => 'VALIDATION_FAILED', 'reasons' => $errors];
         }
 
-        return $tool->execute($input);
+        try {
+            return $tool->execute($input);
+        } catch (\Throwable $exception) {
+            $this->agentLogger->warning('agent.tool_failed', [
+                'tool' => $toolName,
+                'exception_class' => $exception::class,
+            ]);
+
+            return ['ok' => false, 'code' => 'TOOL_ERROR'];
+        }
     }
 
     /**
@@ -328,7 +377,10 @@ final class AgentOrchestrator
         if (\is_array($data) && array_is_list($data)) {
             while (\count($data) > 1) {
                 array_pop($data);
-                $candidate = $result + ['data' => $data, 'truncatedBySizeLimit' => true];
+                // Array union preserves the original `data` key, which made
+                // every retry re-measure the untruncated payload and silently
+                // fall through to TOOL_RESULT_TOO_LARGE. Replace the field.
+                $candidate = array_replace($result, ['data' => $data, 'truncatedBySizeLimit' => true]);
                 $length = \strlen((string) json_encode($candidate, JSON_UNESCAPED_SLASHES));
                 if ($length <= self::TOOL_RESULT_MAX_BYTES) {
                     return $candidate;
@@ -365,6 +417,37 @@ final class AgentOrchestrator
         return trim($clamped);
     }
 
+    private function deadlineReached(\DateTimeImmutable $turnStartedAt): bool
+    {
+        $deadline = $turnStartedAt->modify(sprintf('+%d seconds', max(0, $this->config->turnDeadlineSec)));
+
+        return $this->clock->now() >= $deadline;
+    }
+
+    /**
+     * The empty-answer fallback follows the language of the user's message:
+     * the assistant supports French and English, and the model may fail
+     * before it can answer in the requested language.
+     */
+    private function fallbackFor(string $message): string
+    {
+        // Accents are decisive. Without them a single short word is too weak
+        // ("comment" is also English), so require either one strong marker or
+        // two distinct common French words before claiming the language.
+        if (preg_match('/[àâäçéèêëîïôöùûüÿœæ]/iu', $message)) {
+            return self::FALLBACK_FR;
+        }
+
+        if (preg_match('/\b(?:je|nous|vous|pourquoi|bonjour|merci|quel|quelle|sont|avec)\b/iu', $message)) {
+            return self::FALLBACK_FR;
+        }
+
+        preg_match_all('/\b(?:mon|ma|mes|le|la|les|un|une|des|du|est|pas|pour|dans)\b/iu', $message, $matches);
+        $distinct = \count(array_unique(array_map('mb_strtolower', $matches[0])));
+
+        return $distinct >= 2 ? self::FALLBACK_FR : self::FALLBACK_EN;
+    }
+
     /**
      * @param array<string, mixed> $result
      */
@@ -376,7 +459,7 @@ final class AgentOrchestrator
         }
 
         $data = $result['data'] ?? null;
-        if (\is_array($data)) {
+        if (\is_array($data) && array_is_list($data)) {
             return $toolName.': '.\count($data).' row(s)';
         }
 

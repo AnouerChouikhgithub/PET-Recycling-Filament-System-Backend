@@ -38,6 +38,12 @@ final class AgentConfig
         public readonly string $baseUrl = self::DEFAULT_BASE_URL,
         public readonly int $connectTimeoutSec = self::DEFAULT_CONNECT_TIMEOUT_SEC,
         public readonly int $requestTimeoutSec = self::DEFAULT_REQUEST_TIMEOUT_SEC,
+        /** Whole-turn budget checked before every model call. */
+        public readonly int $turnDeadlineSec = 45,
+        /** Inactive conversation retention period. */
+        public readonly int $retentionDays = 30,
+        /** Grace period after user soft-delete. */
+        public readonly int $softDeleteGraceDays = 7,
     ) {
     }
 
@@ -50,8 +56,7 @@ final class AgentConfig
      *   output side: (maxToolRounds + 1) calls x max_tokens each
      *
      * The estimate never depends on the actual content of the turn, so it
-     * can be taken before anything is persisted (docs/ai-agent-test-plan.md
-     * T3.2: nothing is saved on a cap-rejected turn).
+     * can be taken before anything is persisted (nothing is saved on a cap-rejected turn).
      */
     public function reserveEstimateTokens(): int
     {

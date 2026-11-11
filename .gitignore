@@ -1,5 +1,6 @@
 
 ###> symfony/framework-bundle ###
+/.env
 /.env.local
 /.env.local.php
 /.env.*.local
@@ -33,7 +34,8 @@
 
 ###> mqtt broker (local dev) ###
 # Broker credentials are SECRETS: created by bin/mqtt-user.ps1 / .sh, never
-# committed. Committed .env stays a secret-free skeleton.
+# committed. Local .env files may hold secrets and are never committed;
+# .env.example and .env.test are the only tracked env templates.
 /docker/mosquitto/passwd
 ###< mqtt broker (local dev) ###
 .env.dev

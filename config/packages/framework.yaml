@@ -2,14 +2,29 @@
 framework:
     secret: '%env(APP_SECRET)%'
 
+    # Opt-in reverse-proxy trust. Empty (the default) trusts no proxy, so a
+    # spoofed X-Forwarded-For cannot change getClientIp() in dev/test.
+    trusted_proxies: '%env(default::TRUSTED_PROXIES)%'
+
     # Note that the session will be started ONLY if you read or write from it.
     session: true
 
     #esi: true
     #fragments: true
 
+when@dev:
+    framework:
+        # Forwarded headers are honored only from an address in TRUSTED_PROXIES.
+        trusted_headers: ['x-forwarded-for', 'x-forwarded-proto', 'x-forwarded-host', 'x-forwarded-port']
+
 when@test:
     framework:
         test: true
         session:
             storage_factory_id: session.storage.factory.mock_file
+        trusted_headers: ['x-forwarded-for', 'x-forwarded-proto', 'x-forwarded-host', 'x-forwarded-port']
+
+when@prod:
+    framework:
+        # Comma-separated list; deployment must provide it.
+        trusted_headers: '%env(csv:TRUSTED_HEADERS)%'

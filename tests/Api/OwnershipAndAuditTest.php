@@ -84,6 +84,36 @@ final class OwnershipAndAuditTest extends WebTestCase
         self::assertResponseIsSuccessful('admin override reaches other users machines');
     }
 
+    public function testAdminCannotCommandAnotherUsersMachine(): void
+    {
+        $owner = $this->createUser('cmd-owner-'.$this->suffix, 'cmd-owner-pass-123', false);
+        $machine = $this->createMachine('Not Yours', 'not-yours-'.substr($this->suffix, 0, 8), $owner['user']);
+        $machine->setStatus(MachineStatus::Idle)->markAsSeen();
+        $this->em->flush();
+
+        $admin = $this->createUser('cmd-admin-'.$this->suffix, 'cmd-admin-pass-123', true);
+        $this->login((string) $admin['email'], (string) $admin['password']);
+
+        $this->client->request('POST', '/api/machines/'.$machine->getId()->toRfc4122().'/commands', [], [], ['CONTENT_TYPE' => 'application/json'], (string) json_encode(['command' => 'start']));
+
+        self::assertResponseStatusCodeSame(404, 'admins may read but not command foreign machines');
+        self::assertSame('MACHINE_NOT_FOUND', $this->json()['error']['code'], 'the denial uses the standard non-enumerable 404');
+        self::assertCount(0, $this->em->getRepository(MachineCommandAudit::class)->findBy(['machine' => $machine]), 'no audit row for a denied command');
+    }
+
+    public function testAdminCanCommandOwnMachine(): void
+    {
+        $admin = $this->createUser('cmd-self-'.$this->suffix, 'cmd-self-pass-123', true);
+        $machine = $this->createMachine('Admin Owned', 'admin-owned-'.substr($this->suffix, 0, 8), $admin['user']);
+        $machine->setStatus(MachineStatus::Idle)->markAsSeen();
+        $this->em->flush();
+
+        $this->login((string) $admin['email'], (string) $admin['password']);
+        $this->client->request('POST', '/api/machines/'.$machine->getId()->toRfc4122().'/commands', [], [], ['CONTENT_TYPE' => 'application/json'], (string) json_encode(['command' => 'start']));
+
+        self::assertResponseStatusCodeSame(202, 'strict ownership still allows the owner, admin or not');
+    }
+
     public function testAcceptedCommandWritesOneAuditRow(): void
     {
         $owner = $this->createUser('audit-'.$this->suffix, 'audit-pass-123', false);
@@ -147,9 +177,9 @@ final class OwnershipAndAuditTest extends WebTestCase
 
     public function testMachineCommandTypePublicValuesMatchContract(): void
     {
-        // The public API contract is docs/api-contract.md — this test fails
-        // if anyone adds/removes/renames a command value silently.
-        $contract = file_get_contents(dirname(__DIR__, 2).'/docs/api-contract.md');
+        // The public API contract is the README — this test fails if anyone
+        // adds/removes/renames a command value silently.
+        $contract = file_get_contents(dirname(__DIR__, 2).'/README.md');
         self::assertIsString($contract);
         // Normalize line endings first: with core.autocrlf=true the working
         // copy of this document is CRLF on Windows while the committed blob
@@ -158,14 +188,14 @@ final class OwnershipAndAuditTest extends WebTestCase
 
         // The whole list must sit on ONE "Commands:" line, every value backticked.
         preg_match('/^Commands:((?:\s+`[^`]+`)+)\.?$/m', $contract, $line);
-        self::assertArrayHasKey(1, $line, 'docs/api-contract.md must list the command values on one line');
+        self::assertArrayHasKey(1, $line, 'README.md must list the command values on one line');
 
         preg_match_all('/`([^`]+)`/', $line[1], $m);
         $documented = $m[1];
         self::assertSame(
             \App\Entity\MachineCommandType::values(),
             $documented,
-            'MachineCommandType public values and docs/api-contract.md must stay identical',
+            'MachineCommandType public values and README.md must stay identical',
         );
     }
 

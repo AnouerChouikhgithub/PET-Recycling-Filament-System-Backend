@@ -4,10 +4,24 @@ declare(strict_types=1);
 
 namespace App\Tests\Agent;
 
+use App\Controller\Api\AgentController;
 use App\Entity\AgentMessage;
 use App\Entity\AgentTokenUsage;
+use App\Entity\MachineCommandAudit;
+use App\Entity\MachineCommandType;
+use App\Service\Agent\AgentOrchestrator;
+use App\Service\Agent\AgentTool;
+use App\Service\Agent\Tools\GetAuditLogTool;
+use App\Service\Agent\Tools\GetLatestTelemetryTool;
+use App\Service\Agent\Tools\GetRecentEventsTool;
+use App\Service\Agent\UtcDayReset;
+use App\Service\Agent\ToolRegistry;
 use Doctrine\ORM\EntityManagerInterface;
-
+use Monolog\Handler\TestHandler;
+use ReflectionProperty;
+use Symfony\Component\HttpFoundation\Request;
+use Symfony\Component\Security\Core\Authentication\Token\Storage\TokenStorageInterface;
+use Symfony\Component\Security\Core\Authentication\Token\UsernamePasswordToken;
 /**
  * Provider-failure lifecycle, tool input validation and result bounding
  * (session 2 phases B/C/E/F): the scripted stub drives with
@@ -47,6 +61,334 @@ final class AgentFailureAndValidationTest extends AgentApiTestCase
         self::assertNotContains('assistant', $roles, 'a provider failure never creates an assistant answer');
     }
 
+    public function testEmptyModelAnswerUsesAndPersistsFallback(): void
+    {
+        $owner = $this->createUser('empty-answer', 'empty-answer-pass-123');
+        static::getContainer()->get(TokenStorageInterface::class)->setToken(
+            new UsernamePasswordToken($owner['user'], 'main', $owner['user']->getRoles()),
+        );
+        $stub = $this->stub();
+        $stub->reset();
+        $controller = static::getContainer()->get(AgentController::class);
+        $controllerOrchestrator = (new ReflectionProperty(AgentController::class, 'orchestrator'))->getValue($controller);
+        self::assertSame($stub, (new ReflectionProperty(AgentOrchestrator::class, 'llm'))->getValue($controllerOrchestrator));
+        $stub->addResponse([['type' => 'text', 'text' => '']]);
+
+        $request = Request::create('/api/agent/chat', 'POST', [], [], [], ['CONTENT_TYPE' => 'application/json'], (string) json_encode(['message' => 'empty answer']));
+        $response = $controller->chat($request);
+
+        self::assertSame(200, $response->getStatusCode());
+        self::assertSame(1, $stub->calls);
+        $fallback = "I couldn't complete that lookup. Please try again.";
+        $body = json_decode((string) $response->getContent(), true);
+        self::assertSame($fallback, $body['data']['message']['content']);
+        $persisted = $this->em->getConnection()->fetchOne(
+            "SELECT content FROM agent_message WHERE conversation_id = CAST(:id AS uuid) AND role = 'assistant'",
+            ['id' => $body['data']['conversationId']],
+        );
+        self::assertSame($fallback, $persisted);
+    }
+
+    public function testToolRoundCapWithoutTextUsesAndPersistsFallback(): void
+    {
+        $owner = $this->createUser('round-cap', 'round-cap-pass-123');
+        $machine = $this->createMachine('Round cap machine', 'rc-'.substr($this->suffix, 0, 8), $owner['user']);
+        static::getContainer()->get(TokenStorageInterface::class)->setToken(
+            new UsernamePasswordToken($owner['user'], 'main', $owner['user']->getRoles()),
+        );
+        $stub = $this->stub();
+        $stub->reset();
+        $controller = static::getContainer()->get(AgentController::class);
+        $controllerOrchestrator = (new ReflectionProperty(AgentController::class, 'orchestrator'))->getValue($controller);
+        self::assertSame($stub, (new ReflectionProperty(AgentOrchestrator::class, 'llm'))->getValue($controllerOrchestrator));
+
+        for ($i = 1; $i <= 5; ++$i) {
+            $stub->addResponse([['type' => 'tool_use', 'id' => 'cap-'.$i, 'name' => 'get_recent_events', 'input' => ['machineId' => $machine->getId()->toRfc4122()]]]);
+        }
+
+        $request = Request::create('/api/agent/chat', 'POST', [], [], [], ['CONTENT_TYPE' => 'application/json'], (string) json_encode(['message' => 'keep checking events']));
+        $response = $controller->chat($request);
+
+        self::assertSame(200, $response->getStatusCode());
+        $fallback = "I couldn't complete that lookup. Please try again.";
+        $body = json_decode((string) $response->getContent(), true);
+        self::assertSame($fallback, $body['data']['message']['content']);
+        self::assertSame(5, $stub->calls);
+        self::assertSame('tool round limit reached', $body['data']['message']['toolCalls'][4]['summary']);
+        $persisted = $this->em->getConnection()->fetchOne(
+            "SELECT content FROM agent_message WHERE conversation_id = CAST(:id AS uuid) AND role = 'assistant'",
+            ['id' => $body['data']['conversationId']],
+        );
+        self::assertSame($fallback, $persisted);
+    }
+
+    public function testRoundCapIgnoresFillerTextAndUsesFallback(): void
+    {
+        $owner = $this->createUser('round-cap-text', 'round-cap-pass-123');
+        $machine = $this->createMachine('Round cap text', 'rct-'.substr($this->suffix, 0, 8), $owner['user']);
+        $this->login((string) $owner['email'], (string) $owner['password']);
+
+        for ($i = 1; $i <= 4; ++$i) {
+            $this->stub()->addResponse([['type' => 'tool_use', 'id' => 'cap-t-'.$i, 'name' => 'get_recent_events', 'input' => ['machineId' => $machine->getId()->toRfc4122()]]]);
+        }
+        // The capped response also carries filler text: it must NOT become
+        // the final answer for a turn that never completed.
+        $this->stub()->addResponse([
+            ['type' => 'text', 'text' => 'Here is a partial summary.'],
+            ['type' => 'tool_use', 'id' => 'cap-t-5', 'name' => 'get_recent_events', 'input' => ['machineId' => $machine->getId()->toRfc4122()]],
+        ]);
+
+        $this->client->request('POST', '/api/agent/chat', [], [], ['CONTENT_TYPE' => 'application/json'], (string) json_encode(['message' => 'keep checking events']));
+
+        self::assertResponseStatusCodeSame(200);
+        self::assertSame("I couldn't complete that lookup. Please try again.", $this->json()['data']['message']['content']);
+    }
+
+    public function testWhitespaceOnlyAnswerUsesFallback(): void
+    {
+        $owner = $this->createUser('white-answer', 'white-answer-pass');
+        $this->login((string) $owner['email'], (string) $owner['password']);
+        $this->stub()->addResponse([['type' => 'text', 'text' => "  \n\t "]]);
+
+        $this->client->request('POST', '/api/agent/chat', [], [], ['CONTENT_TYPE' => 'application/json'], (string) json_encode(['message' => 'hello']));
+
+        self::assertResponseStatusCodeSame(200);
+        self::assertSame("I couldn't complete that lookup. Please try again.", $this->json()['data']['message']['content']);
+    }
+
+    public function testFrenchPromptGetsFrenchFallbackAtRoundCap(): void
+    {
+        $owner = $this->createUser('round-cap-fr', 'round-cap-pass-123');
+        $machine = $this->createMachine('Round cap FR', 'rcfr-'.substr($this->suffix, 0, 8), $owner['user']);
+        static::getContainer()->get(TokenStorageInterface::class)->setToken(
+            new UsernamePasswordToken($owner['user'], 'main', $owner['user']->getRoles()),
+        );
+        $stub = $this->stub();
+        $stub->reset();
+        $controller = static::getContainer()->get(AgentController::class);
+
+        for ($i = 1; $i <= 5; ++$i) {
+            $stub->addResponse([['type' => 'tool_use', 'id' => 'cap-fr-'.$i, 'name' => 'get_recent_events', 'input' => ['machineId' => $machine->getId()->toRfc4122()]]]);
+        }
+
+        $request = Request::create('/api/agent/chat', 'POST', [], [], [], ['CONTENT_TYPE' => 'application/json'], (string) json_encode(['message' => 'vérifie encore les événements']));
+        $response = $controller->chat($request);
+
+        self::assertSame(200, $response->getStatusCode());
+        $body = json_decode((string) $response->getContent(), true);
+        self::assertSame("Je n'ai pas pu terminer cette recherche. Veuillez réessayer.", $body['data']['message']['content']);
+        self::assertSame(5, $stub->calls);
+    }
+
+    /**
+     * "comment" is also an English word, so the empty-answer fallback must not
+     * switch language because of it alone.
+     */
+    public function testEnglishPromptWithAmbiguousWordGetsEnglishFallbackAtRoundCap(): void
+    {
+        $owner = $this->createUser('round-cap-en', 'round-cap-en-pass');
+        $machine = $this->createMachine('Round cap EN', 'rcen-'.substr($this->suffix, 0, 8), $owner['user']);
+        static::getContainer()->get(TokenStorageInterface::class)->setToken(
+            new UsernamePasswordToken($owner['user'], 'main', $owner['user']->getRoles()),
+        );
+        $stub = $this->stub();
+        $stub->reset();
+        $controller = static::getContainer()->get(AgentController::class);
+
+        for ($i = 1; $i <= 5; ++$i) {
+            $stub->addResponse([['type' => 'tool_use', 'id' => 'cap-en-'.$i, 'name' => 'get_recent_events', 'input' => ['machineId' => $machine->getId()->toRfc4122()]]]);
+        }
+
+        $request = Request::create('/api/agent/chat', 'POST', [], [], [], ['CONTENT_TYPE' => 'application/json'], (string) json_encode(['message' => 'comment on the last session']));
+        $response = $controller->chat($request);
+
+        self::assertSame(200, $response->getStatusCode());
+        $body = json_decode((string) $response->getContent(), true);
+        self::assertSame("I couldn't complete that lookup. Please try again.", $body['data']['message']['content']);
+    }
+
+    public function testDailyTokenCapRetryAfterIsSecondsUntilUtcMidnight(): void
+    {
+        $utc = new \DateTimeZone('UTC');
+
+        self::assertSame(3600, UtcDayReset::secondsUntilNextMidnightUtc(new \DateTimeImmutable('2026-11-06 23:00:00', $utc)));
+        self::assertSame(1, UtcDayReset::secondsUntilNextMidnightUtc(new \DateTimeImmutable('2026-11-06 23:59:59', $utc)));
+        self::assertSame(86400, UtcDayReset::secondsUntilNextMidnightUtc(new \DateTimeImmutable('2026-11-06 00:00:00', $utc)));
+    }
+
+    public function testToolSummariesCountListsButNotAssociativeObjects(): void
+    {
+        $owner = $this->createUser('summary-shapes', 'summary-shapes-pass-123');
+        static::getContainer()->get(TokenStorageInterface::class)->setToken(
+            new UsernamePasswordToken($owner['user'], 'main', $owner['user']->getRoles()),
+        );
+        $stub = $this->stub();
+        $stub->reset();
+        $controller = static::getContainer()->get(AgentController::class);
+        $controllerOrchestrator = (new ReflectionProperty(AgentController::class, 'orchestrator'))->getValue($controller);
+        self::assertSame($stub, (new ReflectionProperty(AgentOrchestrator::class, 'llm'))->getValue($controllerOrchestrator));
+        $stub->addResponse([
+            ['type' => 'tool_use', 'id' => 'list-shape', 'name' => 'list_my_machines', 'input' => []],
+            ['type' => 'tool_use', 'id' => 'object-shape', 'name' => 'explain_fault_code', 'input' => ['faultCode' => 'unknown-code']],
+        ]);
+        $stub->addResponse([['type' => 'text', 'text' => 'Summaries prepared.']]);
+
+        $request = Request::create('/api/agent/chat', 'POST', [], [], [], ['CONTENT_TYPE' => 'application/json'], (string) json_encode(['message' => 'summarize results']));
+        $response = $controller->chat($request);
+        self::assertSame(200, $response->getStatusCode());
+        $body = json_decode((string) $response->getContent(), true);
+        self::assertSame([
+            ['name' => 'list_my_machines', 'summary' => 'list_my_machines: 0 row(s)'],
+            ['name' => 'explain_fault_code', 'summary' => 'explain_fault_code: ok'],
+        ], $body['data']['message']['toolCalls']);
+    }
+
+    public function testMultipleToolUsesProduceOrderedResultsInOneFollowUpMessage(): void
+    {
+        $owner = $this->createUser('multi-tool', 'multi-tool-pass-123');
+        $machine = $this->createMachine('Multi tool machine', 'mt-'.substr($this->suffix, 0, 8), $owner['user']);
+        $this->login((string) $owner['email'], (string) $owner['password']);
+
+        $this->stub()->addResponse([
+            ['type' => 'tool_use', 'id' => 'tool-list', 'name' => 'list_my_machines', 'input' => []],
+            ['type' => 'tool_use', 'id' => 'tool-fault', 'name' => 'explain_fault_code', 'input' => ['faultCode' => 'unknown-code']],
+        ]);
+        $this->stub()->addResponse([['type' => 'text', 'text' => 'Both lookups completed.']]);
+
+        $this->client->request('POST', '/api/agent/chat', [], [], ['CONTENT_TYPE' => 'application/json'], (string) json_encode(['message' => 'check machines and code']));
+
+        self::assertResponseStatusCodeSame(200);
+        self::assertSame(2, $this->stub()->calls);
+        $received = $this->stub()->receivedMessages;
+        $toolResultMessages = array_values(array_filter($received, static fn (array $message): bool => 'tool_result' === ($message['role'] ?? null)));
+        self::assertCount(1, $toolResultMessages);
+        self::assertCount(2, $toolResultMessages[0]['content']);
+        self::assertSame('tool-list', $toolResultMessages[0]['content'][0]['tool_use_id']);
+        self::assertSame('tool-fault', $toolResultMessages[0]['content'][1]['tool_use_id']);
+        self::assertStringContainsString((string) $machine->getId()->toRfc4122(), (string) json_encode($toolResultMessages[0]['content'][0]['content']));
+        self::assertSame('explain_fault_code', $toolResultMessages[0]['content'][1]['name']);
+    }
+
+    public function testAuditLogRejectsInvalidMachineIdBeforeQuery(): void
+    {
+        $owner = $this->createUser('audit-invalid', 'audit-pass-123');
+        static::getContainer()->get(TokenStorageInterface::class)->setToken(
+            new UsernamePasswordToken($owner['user'], 'main', $owner['user']->getRoles()),
+        );
+
+        self::assertSame(
+            ['ok' => false, 'code' => 'VALIDATION_FAILED'],
+            static::getContainer()->get(GetAuditLogTool::class)->execute(['machineId' => 'abc']),
+        );
+    }
+
+    public function testAuditLogForeignValidMachineIsEmptyAndOwnedMachineReturnsRows(): void
+    {
+        $owner = $this->createUser('audit-owner', 'audit-pass-123');
+        $other = $this->createUser('audit-other', 'audit-pass-123');
+        $mine = $this->createMachine('Audit mine', 'am-'.substr($this->suffix, 0, 8), $owner['user']);
+        $theirs = $this->createMachine('Audit theirs', 'at-'.substr($this->suffix, 0, 8), $other['user']);
+        $this->em->persist(new MachineCommandAudit($mine, $owner['user'], MachineCommandType::SetFan, 50.0));
+        $this->em->persist(new MachineCommandAudit($theirs, $other['user'], MachineCommandType::SetFan, 75.0));
+        $this->em->flush();
+
+        static::getContainer()->get(TokenStorageInterface::class)->setToken(
+            new UsernamePasswordToken($owner['user'], 'main', $owner['user']->getRoles()),
+        );
+        $tool = static::getContainer()->get(GetAuditLogTool::class);
+
+        self::assertSame(['ok' => true, 'data' => []], $tool->execute(['machineId' => $theirs->getId()->toRfc4122()]));
+        $ownResult = $tool->execute(['machineId' => $mine->getId()->toRfc4122()]);
+        self::assertTrue($ownResult['ok']);
+        self::assertCount(1, $ownResult['data']);
+        self::assertSame($mine->getName(), $ownResult['data'][0]['machineName']);
+    }
+
+    public function testMachineToolsRejectMalformedUuidBeforeMachineLookup(): void
+    {
+        $owner = $this->createUser('machine-uuid', 'machine-uuid-pass-123');
+        static::getContainer()->get(TokenStorageInterface::class)->setToken(
+            new UsernamePasswordToken($owner['user'], 'main', $owner['user']->getRoles()),
+        );
+
+        self::assertSame(
+            ['ok' => false, 'code' => 'VALIDATION_FAILED'],
+            static::getContainer()->get(GetRecentEventsTool::class)->execute(['machineId' => 'abc']),
+        );
+        self::assertSame(
+            ['ok' => false, 'code' => 'VALIDATION_FAILED'],
+            static::getContainer()->get(GetLatestTelemetryTool::class)->execute(['machineId' => 'abc']),
+        );
+    }
+
+    public function testThrowingToolBecomesSafeToolErrorData(): void
+    {
+        $owner = $this->createUser('tool-error', 'tool-error-pass-123');
+        $this->login((string) $owner['email'], (string) $owner['password']);
+
+        $secret = 'secret detail from tool exception';
+        $throwingTool = new class($secret) implements AgentTool {
+            public function __construct(private readonly string $secret)
+            {
+            }
+
+            public function name(): string
+            {
+                return 'list_my_machines';
+            }
+
+            public function description(): string
+            {
+                return 'test tool that throws';
+            }
+
+            public function inputSchema(): array
+            {
+                return ['type' => 'object', 'properties' => [], 'additionalProperties' => false];
+            }
+
+            public function execute(array $input): array
+            {
+                throw new \RuntimeException($this->secret);
+            }
+        };
+
+        $registry = static::getContainer()->get(ToolRegistry::class);
+        $registryProperty = new \ReflectionProperty(ToolRegistry::class, 'tools');
+        $tools = $registryProperty->getValue($registry);
+        $tools['list_my_machines'] = $throwingTool;
+        $registryProperty->setValue($registry, $tools);
+
+        $logger = static::getContainer()->get('monolog.logger.agent');
+        $handler = new TestHandler();
+        $logger->pushHandler($handler);
+
+        $this->stub()->addResponse([['type' => 'tool_use', 'id' => 'throwing-tool', 'name' => 'list_my_machines', 'input' => []]]);
+        $this->stub()->addResponse([['type' => 'text', 'text' => 'I could not complete that lookup.']]);
+
+        try {
+            $this->client->request('POST', '/api/agent/chat', [], [], ['CONTENT_TYPE' => 'application/json'], (string) json_encode(['message' => 'list my machines']));
+            self::assertResponseStatusCodeSame(200);
+
+            $body = (string) $this->client->getResponse()->getContent();
+            $received = (string) json_encode($this->stub()->receivedMessages);
+            $persistedRows = $this->em->getConnection()->fetchAllAssociative('SELECT content FROM agent_message');
+            $persisted = (string) json_encode($persistedRows);
+            self::assertStringContainsString('TOOL_ERROR', $received);
+            self::assertStringNotContainsString($secret, $received.$persisted.$body);
+
+            $records = $handler->getRecords();
+            $failureRecords = array_values(array_filter($records, static fn ($record): bool => 'agent.tool_failed' === $record['message']));
+            self::assertCount(1, $failureRecords);
+            self::assertSame([
+                'tool' => 'list_my_machines',
+                'exception_class' => \RuntimeException::class,
+            ], $failureRecords[0]['context']);
+        } finally {
+            $logger->popHandler();
+        }
+    }
+
     public function testMissingProviderUsageIsBilledTheConservativeFloor(): void
     {
         $owner = $this->createUser('f2', 'fail-pass-123');
@@ -69,6 +411,26 @@ final class AgentFailureAndValidationTest extends AgentApiTestCase
      * must refund the reservation completely. The provider cannot have
      * generated a token, so the conservative floor would be a pure loss.
      */
+    public function testToolResultSizeLimitTruncatesListRowsBeforeRefusingPayload(): void
+    {
+        $owner = $this->createUser('tool-size-limit', 'tool-size-pass-123');
+        $machine = $this->createMachine('M', 'sz-'.substr($this->suffix, 0, 8), $owner['user']);
+        static::getContainer()->get(TokenStorageInterface::class)->setToken(
+            new UsernamePasswordToken($owner['user'], 'main', $owner['user']->getRoles()),
+        );
+        $controller = static::getContainer()->get(AgentController::class);
+        $orchestrator = (new ReflectionProperty(AgentController::class, 'orchestrator'))->getValue($controller);
+        $clamp = new \ReflectionMethod(AgentOrchestrator::class, 'clampResult');
+        $payload = ['ok' => true, 'data' => array_fill(0, 1000, ['name' => str_repeat('x', 100)])];
+
+        $result = $clamp->invoke($orchestrator, $payload);
+
+        self::assertTrue($result['ok']);
+        self::assertTrue($result['truncatedBySizeLimit']);
+        self::assertLessThanOrEqual(AgentOrchestrator::TOOL_RESULT_MAX_BYTES, strlen((string) json_encode($result, JSON_UNESCAPED_SLASHES)));
+        self::assertLessThan(count($payload['data']), count($result['data']));
+    }
+
     public function testPreflightRefusalRefundsTheWholeReservation(): void
     {
         $owner = $this->createUser('f7', 'fail-pass-123');

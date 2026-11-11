@@ -77,7 +77,8 @@ security:
 
     # Note: Only the *first* matching rule is applied
     access_control:
-        # Public auth surface (rate limits live on the routes, not here).
+        # Public health and auth surface.
+        - { path: ^/api/health$, roles: PUBLIC_ACCESS }
         - { path: ^/api/auth/login$, roles: PUBLIC_ACCESS }
         - { path: ^/api/auth/register$, roles: PUBLIC_ACCESS }
         - { path: ^/api/auth/token/refresh$, roles: PUBLIC_ACCESS }
@@ -113,6 +114,16 @@ when@test:
                 policy: sliding_window
                 limit: '%env(int:RATE_LIMIT_REGISTER)%'
                 interval: 10 minutes
+                cache_pool: test_rate_limiter_storage
+            auth_refresh:
+                policy: sliding_window
+                limit: 1000
+                interval: 5 minutes
+                cache_pool: test_rate_limiter_storage
+            health:
+                policy: sliding_window
+                limit: 1000
+                interval: 1 minute
                 cache_pool: test_rate_limiter_storage
 
     security:

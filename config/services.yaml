@@ -23,6 +23,9 @@ parameters:
     app.agent.base_url_default: 'https://api.anthropic.com'
     app.agent.connect_timeout_default: 5
     app.agent.request_timeout_default: 30
+    app.agent.turn_deadline_default: 45
+    app.agent.retention_days_default: 30
+    app.agent.soft_delete_grace_days_default: 7
     # Domain exception → stable API error code + HTTP status.
     # Consumed by App\Api\EventSubscriber\ApiExceptionSubscriber; add new
     # mappings here instead of editing subscriber code.
@@ -58,6 +61,7 @@ parameters:
     app.mqtt.command_ttl_seconds_default: 30
     app.mqtt.max_payload_bytes_default: 4096
     app.mqtt.telemetry_max_per_second_default: 2
+    app.mqtt.consumer_max_messages_default: 10000
 
 services:
     # default configuration for services in *this* file
@@ -83,6 +87,7 @@ services:
         arguments:
             $loginLimiter: '@limiter.auth_login'
             $registerLimiter: '@limiter.auth_register'
+            $refreshLimiter: '@limiter.auth_refresh'
 
     App\Controller\Api\AuthController:
         arguments:
@@ -106,6 +111,10 @@ services:
             $fanMax: '%app.command.fan_max%'
 
     App\Security\DeviceTokenAuthenticator: ~
+
+    App\Command\MqttConsumeCommand:
+        arguments:
+            $maxMessagesDefault: '%env(default:app.mqtt.consumer_max_messages_default:int:MQTT_CONSUMER_MAX_MESSAGES)%'
 
     App\Service\IoT\MqttConfig:
         # Typed MQTT_* parameters (App\Service\IoT\MqttConfig). The five
@@ -181,6 +190,9 @@ services:
             $baseUrl: '%env(default:app.agent.base_url_default:string:AGENT_BASE_URL)%'
             $connectTimeoutSec: '%env(default:app.agent.connect_timeout_default:int:AGENT_CONNECT_TIMEOUT_SEC)%'
             $requestTimeoutSec: '%env(default:app.agent.request_timeout_default:int:AGENT_REQUEST_TIMEOUT_SEC)%'
+            $turnDeadlineSec: '%env(default:app.agent.turn_deadline_default:int:AGENT_TURN_DEADLINE_SEC)%'
+            $retentionDays: '%env(default:app.agent.retention_days_default:int:AGENT_RETENTION_DAYS)%'
+            $softDeleteGraceDays: '%env(default:app.agent.soft_delete_grace_days_default:int:AGENT_SOFT_DELETE_GRACE_DAYS)%'
 
     # REAL provider (session 2). The TEST environment rebinds this alias to
     # the scripted stub (config/packages/test/services.yaml) so the suite
@@ -195,6 +207,7 @@ services:
             $httpClient: '@http_client'
             $apiKey: '%env(string:ANTHROPIC_API_KEY)%'
             $agentLogger: '@monolog.logger.agent'
+            $environment: '%kernel.environment%'
 
     App\Service\Agent\ScriptedStubLlmClient:
         public: true

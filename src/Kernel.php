@@ -12,6 +12,15 @@ class Kernel extends BaseKernel
 {
     use MicroKernelTrait;
 
+    public function __construct(string $environment, bool $debug)
+    {
+        parent::__construct($environment, $debug);
+
+        // Every stored timestamp and every comparison is UTC. Enforcing this
+        // here also makes local Docker/Windows runs match production.
+        date_default_timezone_set('UTC');
+    }
+
     protected function build(ContainerBuilder $container): void
     {
         // Registers the `device-token` firewall key (App\Security\DeviceTokenAuthenticator):

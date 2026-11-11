@@ -18,6 +18,7 @@ use App\Service\Agent\TurnGuard;
 use Doctrine\ORM\EntityManagerInterface;
 use Psr\Log\NullLogger;
 use Symfony\Bundle\FrameworkBundle\Test\KernelTestCase;
+use Symfony\Component\Clock\MockClock;
 use Symfony\Component\PasswordHasher\Hasher\UserPasswordHasherInterface;
 use Symfony\Component\Uid\Uuid;
 
@@ -52,7 +53,7 @@ final class TokenAccountingTest extends KernelTestCase
         $cap = 2 * $estimate - 1;
         $guard = $this->guardWithCap($cap);
 
-        $guard->reserveTurn($user); // turn 1 reserves the worst-case estimate
+        $reservedAt = $guard->reserveTurn($user); // turn 1 reserves the worst-case estimate
         self::assertSame($estimate, $this->tokensUsed($user), 'the reserve is durable BEFORE the LLM call, before anything is persisted');
 
         try {
@@ -69,7 +70,7 @@ final class TokenAccountingTest extends KernelTestCase
 
         // Settle turn 1 with real usage far below the estimate: the row ends
         // at exactly the REAL usage, so the refund is exact.
-        $guard->settleTurn($user, ['input' => 30, 'output' => 20], $estimate);
+        $guard->settleTurn($user, ['input' => 30, 'output' => 20], $estimate, $reservedAt);
         self::assertSame(50, $this->tokensUsed($user), 'settlement replaces the reservation with the actual usage');
     }
 
@@ -80,8 +81,8 @@ final class TokenAccountingTest extends KernelTestCase
         $estimate = $this->estimateOf(200000);
         $guard = $this->guardWithCap(200000);
 
-        $guard->reserveTurn($user);
-        $guard->settleTurn($user, null, $estimate); // provider reported NOTHING
+        $reservedAt = $guard->reserveTurn($user);
+        $guard->settleTurn($user, null, $estimate, $reservedAt); // provider reported NOTHING
 
         self::assertSame(
             TurnGuard::MISSING_USAGE_ESTIMATE,
@@ -96,8 +97,8 @@ final class TokenAccountingTest extends KernelTestCase
         $estimate = $this->estimateOf(200000);
         $guard = $this->guardWithCap(200000);
 
-        $guard->reserveTurn($user);
-        $guard->reconcileFailedTurn($user, $estimate, 0);
+        $reservedAt = $guard->reserveTurn($user);
+        $guard->reconcileFailedTurn($user, $estimate, 0, $reservedAt);
 
         self::assertSame(
             TurnGuard::MISSING_USAGE_ESTIMATE,
@@ -112,8 +113,8 @@ final class TokenAccountingTest extends KernelTestCase
         $estimate = $this->estimateOf(200000);
         $guard = $this->guardWithCap(200000);
 
-        $guard->reserveTurn($user);
-        $guard->reconcileFailedTurn($user, $estimate, 400); // one completed provider call billed 400
+        $reservedAt = $guard->reserveTurn($user);
+        $guard->reconcileFailedTurn($user, $estimate, 400, $reservedAt); // one completed provider call billed 400
 
         self::assertSame(1400, $this->tokensUsed($user), 'partial usage + floor, estimate remainder refunded');
     }
@@ -130,10 +131,10 @@ final class TokenAccountingTest extends KernelTestCase
         $estimate = $this->estimateOf(200000);
         $guard = $this->guardWithCap(200000);
 
-        $guard->reserveTurn($user);
+        $reservedAt = $guard->reserveTurn($user);
         self::assertSame($estimate, $this->tokensUsed($user));
 
-        $guard->refundFailedTurn($user, $estimate, 0);
+        $guard->refundFailedTurn($user, $estimate, 0, $reservedAt);
 
         self::assertSame(0, $this->tokensUsed($user), 'F4: a turn with no provider work costs nothing');
     }
@@ -145,8 +146,8 @@ final class TokenAccountingTest extends KernelTestCase
         $estimate = $this->estimateOf(200000);
         $guard = $this->guardWithCap(200000);
 
-        $guard->reserveTurn($user);
-        $guard->refundFailedTurn($user, $estimate, 480);
+        $reservedAt = $guard->reserveTurn($user);
+        $guard->refundFailedTurn($user, $estimate, 480, $reservedAt);
 
         self::assertSame(480, $this->tokensUsed($user), 'only real provider usage is kept - never the floor');
     }
@@ -240,12 +241,29 @@ final class TokenAccountingTest extends KernelTestCase
         $estimate = $this->estimateOf(200000);
 
         $guard = $this->guardWithCap(200000);
-        $guard->reserveTurn($user);
-        $guard->settleTurn($user, ['input' => 500, 'output' => 300], $estimate);
+        $reservedAt = $guard->reserveTurn($user);
+        $guard->settleTurn($user, ['input' => 500, 'output' => 300], $estimate, $reservedAt);
 
         // A FRESH guard (new "request") must still see today's row.
         $fresh = $this->guardWithCap(200000);
         self::assertSame(800, $fresh->tokensUsedToday($user), 'accounting lives in the table, not memory');
+    }
+
+    /** Settling after UTC midnight must charge the day the turn RESERVED. */
+    public function testSettlementAfterUtcMidnightUsesTheReservationDay(): void
+    {
+        $user = $this->createUser('tokmid');
+        $estimate = $this->estimateOf(200000);
+        $clock = new MockClock(new \DateTimeImmutable('2026-03-01 23:59:58', new \DateTimeZone('UTC')));
+        $guard = $this->guardWithClock(200000, $clock);
+
+        $reservedAt = $guard->reserveTurn($user);
+        $clock->sleep(4); // 2026-03-02 00:00:02 UTC
+
+        $guard->settleTurn($user, ['input' => 30, 'output' => 20], $estimate, $reservedAt);
+
+        self::assertSame(50, $this->tokensUsedOn($user, '2026-03-01'), 'the new usage belongs to the reservation day');
+        self::assertSame(0, $this->tokensUsedOn($user, '2026-03-02'), 'no phantom row is created after midnight');
     }
 
     // ------------------------------------------------------------ helpers
@@ -280,6 +298,16 @@ final class TokenAccountingTest extends KernelTestCase
         );
     }
 
+    private function guardWithClock(int $dailyCap, MockClock $clock): TurnGuard
+    {
+        return new TurnGuard(
+            $this->config($dailyCap),
+            static::getContainer()->get(AgentTokenUsageRepository::class),
+            static::getContainer()->get('agent_rate_limiter'),
+            $clock,
+        );
+    }
+
     private function createUser(string $prefix): User
     {
         $user = new User();
@@ -292,6 +320,16 @@ final class TokenAccountingTest extends KernelTestCase
         $this->em->flush();
 
         return $user;
+    }
+
+    private function tokensUsedOn(User $user, string $day): int
+    {
+        $row = $this->em->getConnection()->fetchOne(
+            'SELECT tokens_used FROM agent_token_usage WHERE user_id = CAST(:u AS uuid) AND day = :d',
+            ['u' => $user->getId()->toRfc4122(), 'd' => $day],
+        );
+
+        return (int) $row;
     }
 
     private function tokensUsed(User $user): int

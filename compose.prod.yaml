@@ -1,0 +1,119 @@
+# PREPARED, NEVER RUN.
+#
+# Production topology for the backend on one VPS:
+#
+#   internet ── Caddy (app: 80/443, automatic TLS) ── php-fpm (same container)
+#                  │
+#                  ├── postgres   (internal network only, no published port)
+#                  └── mosquitto  (8883 + TLS only; devices connect here)
+#
+#   worker  — the MQTT consumer, same image, bounded by --max-runtime so a
+#             restart always produces a clean process
+#   migrate — one-shot Doctrine migrations; app and worker wait for it
+#
+# Nothing here has been started: no Docker engine, broker or VPS was available.
+# Before the first real cut-over:
+#   1. cp .env.prod.example .env.prod and fill every CHANGE_ME value;
+#   2. generate the JWT key pair (php bin/console lexik:jwt:generate-keypair)
+#      into config/jwt/prod — it is git-ignored and mounted read-only;
+#   3. put the broker passwd file in deploy/mosquitto/passwd and the certificate
+#      files (ca.crt, server.crt, server.key) in deploy/certs;
+#   4. docker compose -f compose.prod.yaml build
+#   5. docker compose -f compose.prod.yaml up -d
+#
+# DEVELOPMENT files (compose.yaml, compose.mqtt.yaml) stay untouched and are
+# never used here: they publish plaintext broker ports and dev credentials.
+
+name: 3awedlou-prod
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?set POSTGRES_DB in .env.prod}
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in .env.prod}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env.prod}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    # No `ports:` on purpose — the database is reachable only on this network.
+
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: 3awedlou-backend:prod
+    env_file: [.env.prod]
+    entrypoint: ["php"]
+    command: ["bin/console", "doctrine:migrations:migrate", "--no-interaction", "--allow-no-migration"]
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: 3awedlou-backend:prod
+    restart: unless-stopped
+    env_file: [.env.prod]
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      # Read-only key material generated on the host; never committed.
+      - ./config/jwt/prod:/app/config/jwt:ro
+      # Caddy's own state (certificates) must survive container recreation.
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  worker:
+    image: 3awedlou-backend:prod
+    restart: unless-stopped
+    env_file: [.env.prod]
+    entrypoint: ["php"]
+    # --max-runtime bounds every run, so the supervisor (compose) always gets a
+    # clean process. SIGTERM is handled gracefully where pcntl is available.
+    command: ["bin/console", "app:mqtt:consume", "--max-runtime=3600", "--memory-limit=256M"]
+    stop_grace_period: 30s
+    volumes:
+      - ./config/jwt/prod:/app/config/jwt:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      mosquitto:
+        condition: service_started
+
+  mosquitto:
+    image: eclipse-mosquitto:2
+    restart: unless-stopped
+    ports:
+      # TLS listener only. There is deliberately no 1883 mapping.
+      - "8883:8883"
+    volumes:
+      - ./deploy/mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - ./deploy/mosquitto/acl:/mosquitto/config/acl:ro
+      # Host-provided, git-ignored: create broker users on the host.
+      - ./deploy/mosquitto/passwd:/mosquitto/config/passwd:ro
+      - ./deploy/certs:/mosquitto/certs:ro
+      - mosquitto_data:/mosquitto/data
+
+volumes:
+  postgres_data:
+  mosquitto_data:
+  caddy_data:
+  caddy_config:

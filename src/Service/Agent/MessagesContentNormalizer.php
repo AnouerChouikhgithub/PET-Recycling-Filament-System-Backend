@@ -11,7 +11,7 @@ namespace App\Service\Agent;
  *   ['role' => 'tool_result', 'content' => [['type' => 'tool_result', 'content' => [...]]]]
  *
  * Tool results are ALWAYS JSON-encoded INSIDE a tool_result block - never
- * interpolated into text (docs/ai-agent-risks.md R1).
+ * interpolated into text (injection barrier).
  */
 final class MessagesContentNormalizer
 {    /** @return array<string, mixed> */
@@ -33,9 +33,28 @@ final class MessagesContentNormalizer
      */
     public static function toolResult(string $id, string $name, array $result): array
     {
-        return ['role' => 'tool_result', 'content' => [
-            ['type' => 'tool_result', 'tool_use_id' => $id, 'name' => $name, 'content' => $result],
-        ]];
+        return self::toolResults([['id' => $id, 'name' => $name, 'result' => $result]]);
+    }
+
+    /**
+     * Build one internal result message for every tool call in a provider
+     * response, preserving call order as required by the Messages API.
+     *
+     * @param list<array{id: string, name: string, result: array<string, mixed>}> $results
+     *
+     * @return array<string, mixed>
+     */
+    public static function toolResults(array $results): array
+    {
+        return ['role' => 'tool_result', 'content' => array_map(
+            static fn (array $item): array => [
+                'type' => 'tool_result',
+                'tool_use_id' => $item['id'],
+                'name' => $item['name'],
+                'content' => $item['result'],
+            ],
+            $results,
+        )];
     }
 
     /**

@@ -79,6 +79,8 @@ Write-Host ""
 Write-Host "== JWT keys present? =="
 if (Test-Path config/jwt/private.pem) { Write-Host "[OK] config/jwt/private.pem exists (values never printed)" }
 else { Write-Host "MISSING: run php bin/console lexik:jwt:generate-keypair"; $fail = 1 }
+if (Test-Path config/jwt/test/private.pem) { Write-Host "[OK] test JWT keys exist (values never printed)" }
+else { Write-Host "MISSING: run APP_ENV=test php bin/console lexik:jwt:generate-keypair --overwrite"; $fail = 1 }
 
 Write-Host ""
 if ($fail -ne 0) {

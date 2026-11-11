@@ -1,0 +1,39 @@
+# PREPARED, NEVER RUN. Caddy front for the backend container.
+#
+# php-fpm listens on 127.0.0.1:9000 inside the same container, so Caddy is the
+# only process reachable from the network. Set APP_DOMAIN (and ACME_EMAIL for
+# Let's Encrypt) in .env.prod; with the default `localhost` Caddy issues a local
+# certificate instead of requesting a public one.
+{
+	admin off
+	email {$ACME_EMAIL:ops@example.invalid}
+}
+
+{$APP_DOMAIN:localhost} {
+	encode zstd gzip
+	root * /app/public
+
+	# The API's largest legitimate body is a telemetry batch; the health probe and
+	# command endpoints are tiny. Keep a hard ceiling well below the PHP limits.
+	request_body {
+		max_size 1MB
+	}
+
+	header {
+		-Server
+		-X-Powered-By
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy no-referrer
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+	}
+
+	# /api/health is public and cheap; everything else goes through Symfony.
+	php_fastcgi 127.0.0.1:9000
+	file_server
+
+	log {
+		output stdout
+		format console
+	}
+}

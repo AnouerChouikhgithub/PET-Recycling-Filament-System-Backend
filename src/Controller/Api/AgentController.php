@@ -13,6 +13,7 @@ use App\Repository\AgentConversationRepository;
 use App\Service\Agent\AgentConfig;
 use App\Service\Agent\AgentOrchestrator;
 use App\Service\Agent\TurnGuard;
+use App\Service\Agent\UtcDayReset;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpFoundation\Request;
@@ -86,7 +87,7 @@ final class AgentController
             return ApiResponse::error($exception->errorCode, $exception->getMessage(), 404);
         } catch (AgentDailyTokenCapException) {
             $response = ApiResponse::error('AGENT_DAILY_TOKEN_CAP', 'Daily AI usage limit reached. Resets at 00:00 UTC.', 429);
-            $response->headers->set('Retry-After', '60');
+            $response->headers->set('Retry-After', (string) UtcDayReset::secondsUntilNextMidnightUtc(new \DateTimeImmutable()));
 
             return $response;
         } catch (AgentLlmUnavailableException) {
@@ -149,7 +150,7 @@ final class AgentController
     private function requireUser(): User
     {
         $user = $this->tokenStorage->getToken()?->getUser();
-        if (!$user instanceof User) {
+        if (!$user instanceof User || \in_array('ROLE_ADMIN', $user->getRoles(), true)) {
             throw new NotFoundHttpException('AGENT_DISABLED');
         }
 

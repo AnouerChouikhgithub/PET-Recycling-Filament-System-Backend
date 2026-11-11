@@ -4,15 +4,17 @@ declare(strict_types=1);
 
 namespace App\Service\Agent\Tools;
 
+use App\Api\Exception\ResourceNotFoundException;
 use App\Entity\MachineCommandAudit;
 use App\Repository\MachineCommandAuditRepository;
 use App\Service\Agent\AgentTool;
 use App\Service\Machine\MachineQueryService;
+use Symfony\Component\Uid\Uuid;
 
 /**
  * Recent events for ONE owned machine. There is no DB store for the MQTT
  * inbound "events" branch yet, so events = this machine's COMMAND AUDIT
- * history (docs/ai-agent-design.md section 4.3). Ownership in code, same as
+ * history. Ownership in code, same as
  * the other tools.
  */
 final class GetRecentEventsTool implements AgentTool
@@ -49,7 +51,7 @@ final class GetRecentEventsTool implements AgentTool
     public function execute(array $input): array
     {
         $machineId = $input['machineId'] ?? null;
-        if (!\is_string($machineId) || '' === $machineId) {
+        if (!\is_string($machineId) || !Uuid::isValid($machineId)) {
             return ['ok' => false, 'code' => 'VALIDATION_FAILED'];
         }
 
@@ -58,8 +60,8 @@ final class GetRecentEventsTool implements AgentTool
         $limit = max(1, min(20, $limit));
 
         try {
-            $machine = $this->queryService->getMachine($machineId);
-        } catch (\Throwable) {
+            $machine = $this->queryService->getMachineStrict($machineId);
+        } catch (ResourceNotFoundException) {
             return ['ok' => false, 'code' => 'MACHINE_NOT_FOUND'];
         }
 

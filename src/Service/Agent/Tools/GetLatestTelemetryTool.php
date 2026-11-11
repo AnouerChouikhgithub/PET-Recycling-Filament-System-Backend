@@ -4,15 +4,17 @@ declare(strict_types=1);
 
 namespace App\Service\Agent\Tools;
 
+use App\Api\Exception\ResourceNotFoundException;
 use App\Service\Agent\AgentTool;
 use App\Service\Machine\MachineQueryService;
+use Symfony\Component\Uid\Uuid;
 
 /**
  * Latest telemetry for ONE owned machine. Ownership is re-checked in CODE
  * (MachineQueryService -> MachineAccess::getOwnedMachine): a machine the
  * user does not own behaves exactly like an unknown id (MACHINE_NOT_FOUND).
  *
- * Honesty contract (docs/ai-agent-test-plan.md T5):
+ * Honesty contract:
  *   - unreported channels arrive as the literal string "Not reported";
  *   - recordedAt + dataAgeSeconds always present;
  *   - staleness label: >120 s "stale", >600 s "very stale, telemetry missing".
@@ -52,15 +54,15 @@ final class GetLatestTelemetryTool implements AgentTool
     public function execute(array $input): array
     {
         $machineId = $input['machineId'] ?? null;
-        if (!\is_string($machineId) || '' === $machineId) {
+        if (!\is_string($machineId) || !Uuid::isValid($machineId)) {
             return ['ok' => false, 'code' => 'VALIDATION_FAILED'];
         }
 
         // Ownership gate FIRST - throws ResourceNotFoundException for
         // unknown OR not-owned ids (same envelope, no enumeration).
         try {
-            $machine = $this->queryService->getMachine($machineId);
-        } catch (\Throwable) {
+            $machine = $this->queryService->getMachineStrict($machineId);
+        } catch (ResourceNotFoundException) {
             return ['ok' => false, 'code' => 'MACHINE_NOT_FOUND'];
         }
 
@@ -79,11 +81,13 @@ final class GetLatestTelemetryTool implements AgentTool
 
         return ['ok' => true, 'data' => [
             'machineId' => $machineId,
-            'temperature' => $telemetry->getTemperature(),
-            'targetTemperature' => $telemetry->getTargetTemperature(),
-            'heaterState' => $telemetry->getHeaterState(),
-            'motorState' => $telemetry->getMotorState(),
-            'motorSpeed' => $telemetry->getMotorSpeed(),
+            'temperature' => $telemetry->getTemperature() ?? $notReported,
+            'targetTemperature' => $telemetry->getTargetTemperature() ?? $notReported,
+            'heaterState' => $telemetry->getHeaterState() ?? $notReported,
+            'motorState' => $telemetry->getMotorState() ?? $notReported,
+            'motorSpeed' => $telemetry->getMotorSpeed() ?? $notReported,
+            'units' => ['temperature' => 'C', 'targetTemperature' => 'C'],
+            'motorSpeedUnit' => 'unverified (firmware label unresolved)',
             // fanState/filamentSpeed/filamentDiameter/energyConsumption have no
             // hardware source today - null must NEVER reach the model as 0/false.
             'fanState' => $telemetry->getFanState() ?? $notReported,

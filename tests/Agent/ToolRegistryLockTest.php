@@ -90,6 +90,12 @@ final class ToolRegistryLockTest extends KernelTestCase
         self::assertSame('Not reported', $data['filamentDiameter'], 'T5.2 null diameter must surface as Not reported');
         self::assertSame('Not reported', $data['energyConsumption'], 'T5.2 null energy must surface as Not reported');
         self::assertSame(212.5, $data['temperature']);
+        self::assertSame('Not reported', $data['targetTemperature']);
+        self::assertSame('Not reported', $data['heaterState']);
+        self::assertSame('Not reported', $data['motorState']);
+        self::assertSame('Not reported', $data['motorSpeed']);
+        self::assertSame(['temperature' => 'C', 'targetTemperature' => 'C'], $data['units']);
+        self::assertSame('unverified (firmware label unresolved)', $data['motorSpeedUnit']);
         self::assertSame('very stale, telemetry missing', $data['staleness'], 'T5.1 >600 s must be labelled very stale');
         self::assertSame(900, $data['dataAgeSeconds']);
         self::assertArrayHasKey('recordedAt', $data);
@@ -107,6 +113,7 @@ final class ToolRegistryLockTest extends KernelTestCase
 
         self::assertSame('fresh', $result['data']['staleness']);
         self::assertFalse($result['data']['heaterState'], 'fresh explicit false is legitimate data (T5.3)');
+        self::assertSame('Not reported', $result['data']['motorState']);
     }
 
     public function testFaultCodeExactMatchOnly(): void
@@ -122,6 +129,20 @@ final class ToolRegistryLockTest extends KernelTestCase
 
         $evil = $tool->execute(['faultCode' => "bad; rm -rf /"]);
         self::assertFalse($evil['data']['known'], 'charset violations are rejected before any matching');
+
+        $expected = [
+            ['1', 'Sensor fault'],
+            ['2', 'Hard over-temperature'],
+            ['3', 'Heater no-rise'],
+            ['4', 'Thermal runaway'],
+            ['5', 'Cold-extrusion interlock'],
+            ['6', 'Watchdog'],
+        ];
+        foreach ($expected as [$code, $title]) {
+            $result = $tool->execute(['faultCode' => $code]);
+            self::assertTrue($result['data']['known'], 'firmware code '.$code.' is known');
+            self::assertSame($title, $result['data']['title']);
+        }
     }
 
     // ---------------------------------------------------------------- helpers

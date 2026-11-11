@@ -171,6 +171,33 @@ final class SecurityIsolationTest extends WebTestCase
         self::assertResponseStatusCodeSame(401, 'user JWTs must never pass the device firewall');
     }
 
+    public function testMachineDeviceTokenKillSwitchRejectsUntilReenabled(): void
+    {
+        $machine = $this->createMachine('Kill switch unit', 'dev-kill-'.substr(Uuid::v7()->toBase32(), 0, 8), $this->emailA);
+        $plaintext = $this->issueDeviceToken($machine);
+        $machine->setDeviceTokensEnabled(false);
+        $this->em->flush();
+
+        $url = '/api/machines/'.$machine->getId()->toRfc4122().'/telemetry';
+        $server = ['CONTENT_TYPE' => 'application/json', 'HTTP_X_DEVICE_TOKEN' => $plaintext];
+        $payload = (string) json_encode(['temperature' => 200.0]);
+
+        $this->client->request('POST', $url, [], [], $server, $payload);
+
+        self::assertResponseStatusCodeSame(401);
+        self::assertSame('INVALID_DEVICE_TOKEN', $this->json()['error']['code']);
+
+        $entityManager = static::getContainer()->get(EntityManagerInterface::class);
+        $machine = $entityManager->getRepository(Machine::class)->find($machine->getId());
+        self::assertNotNull($machine);
+        $machine->setDeviceTokensEnabled(true);
+        $entityManager->flush();
+
+        $this->client->request('POST', $url, [], [], $server, $payload);
+
+        self::assertResponseStatusCodeSame(201);
+    }
+
     public function testRevokedDeviceTokenCannotIngest(): void
     {
         $machine = $this->createMachine('Revoke unit', 'dev-c-'.substr(Uuid::v7()->toBase32(), 0, 8), $this->emailA);

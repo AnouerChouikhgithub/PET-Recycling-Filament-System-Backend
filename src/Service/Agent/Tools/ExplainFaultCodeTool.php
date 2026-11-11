@@ -10,7 +10,7 @@ use App\Service\Agent\FaultCodeTable;
 /**
  * Exact-match fault code lookup. The code arrives as UNTRUSTED data: it
  * must pass the strict charset pattern and match the static table exactly
- * (docs/ai-agent-risks.md R1). Unknown -> known:false - the model is then
+ * (exact match is the injection barrier). Unknown -> known:false - the model is then
  * expected to say the code is unknown instead of inventing a meaning.
  */
 final class ExplainFaultCodeTool implements AgentTool

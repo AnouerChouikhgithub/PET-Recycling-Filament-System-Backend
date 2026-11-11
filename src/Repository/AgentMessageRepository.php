@@ -32,7 +32,9 @@ final class AgentMessageRepository extends ServiceEntityRepository
 
         /** @var list<AgentMessage> $rows */
         $rows = $this->createQueryBuilder('m')
+            ->join('m.conversation', 'c')
             ->andWhere('m.conversation = :conv')
+            ->andWhere('c.deletedAt IS NULL')
             ->setParameter('conv', $conversation)
             ->orderBy('m.createdAt', 'DESC')
             ->setFirstResult(max(0, $total - max(1, $limit)))
@@ -48,7 +50,9 @@ final class AgentMessageRepository extends ServiceEntityRepository
     {
         return (int) $this->createQueryBuilder('m')
             ->select('COUNT(m.id)')
+            ->join('m.conversation', 'c')
             ->andWhere('m.conversation = :conv')
+            ->andWhere('c.deletedAt IS NULL')
             ->setParameter('conv', $conversation)
             ->getQuery()
             ->getSingleScalarResult();

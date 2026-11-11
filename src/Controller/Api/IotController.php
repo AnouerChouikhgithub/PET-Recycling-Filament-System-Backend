@@ -62,7 +62,9 @@ final class IotController
     #[Route('/api/machines/{id}/commands', name: 'api_machine_commands', methods: ['POST'])]
     public function commands(string $id, Request $request): JsonResponse
     {
-        $machine = $this->queryService->getMachine($id);
+        // Commands use STRICT ownership: admins keep read/support access but
+        // may not actuate a machine they do not own.
+        $machine = $this->queryService->getMachineStrict($id);
         $payload = $this->decodeBody($request);
 
         return ApiResponse::success($this->commandService->dispatch($machine, $payload), 202);

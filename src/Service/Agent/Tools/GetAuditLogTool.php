@@ -8,6 +8,7 @@ use App\Entity\User;
 use App\Repository\MachineCommandAuditRepository;
 use App\Service\Agent\AgentTool;
 use Symfony\Component\Security\Core\Authentication\Token\Storage\TokenStorageInterface;
+use Symfony\Component\Uid\Uuid;
 
 /**
  * The CURRENT USER'S OWN command audit history, optionally filtered to one
@@ -66,7 +67,11 @@ final class GetAuditLogTool implements AgentTool
         // Optional machine filter: harmless either way - the owner pin on
         // the JOIN already bounds every row to the user's machines.
         $machineId = $input['machineId'] ?? null;
-        if (\is_string($machineId) && '' !== $machineId) {
+        if (null !== $machineId) {
+            if (!\is_string($machineId) || !Uuid::isValid($machineId)) {
+                return ['ok' => false, 'code' => 'VALIDATION_FAILED'];
+            }
+
             $qb->andWhere('m.id = :mid')->setParameter('mid', $machineId, 'uuid');
         }
 

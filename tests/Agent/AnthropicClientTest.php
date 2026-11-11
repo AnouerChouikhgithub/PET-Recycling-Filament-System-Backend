@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Tests\Agent;
 
+use App\Api\Exception\AgentLlmNotAttemptedException;
 use App\Api\Exception\AgentLlmUnavailableException;
 use App\Service\Agent\AgentConfig;
 use App\Service\Agent\AnthropicClient;
@@ -90,6 +91,74 @@ final class AnthropicClientTest extends TestCase
         self::assertSame('object', $body['tools'][0]['input_schema']['type']);
     }
 
+    public function testMultipleToolResultsAreAllSentInCallOrder(): void
+    {
+        $client = $this->client([$this->textMessage('ok')]);
+        $messages = [
+            ['role' => 'user', 'content' => [['type' => 'text', 'text' => 'check both']]],
+            ['role' => 'assistant', 'content' => [
+                ['type' => 'tool_use', 'id' => 'toolu_a', 'name' => 'list_my_machines', 'input' => []],
+                ['type' => 'tool_use', 'id' => 'toolu_b', 'name' => 'get_latest_telemetry', 'input' => ['machineId' => 'm-1']],
+            ]],
+            ['role' => 'tool_result', 'content' => [
+                ['type' => 'tool_result', 'tool_use_id' => 'toolu_a', 'name' => 'list_my_machines',
+                 'content' => ['ok' => true, 'data' => []]],
+                ['type' => 'tool_result', 'tool_use_id' => 'toolu_b', 'name' => 'get_latest_telemetry',
+                 'content' => ['ok' => true, 'data' => ['motorSpeed' => null]]],
+            ]],
+        ];
+
+        $client->complete($messages, $this->tools());
+
+        $resultTurn = array_slice($this->bodyOf($this->requests[0])['messages'], -1)[0];
+        self::assertSame('user', $resultTurn['role']);
+        self::assertCount(2, $resultTurn['content'], 'every tool_use id gets exactly one result');
+        self::assertSame('toolu_a', $resultTurn['content'][0]['tool_use_id']);
+        self::assertSame('toolu_b', $resultTurn['content'][1]['tool_use_id']);
+        self::assertSame(
+            json_encode(['ok' => true, 'data' => ['motorSpeed' => null]], JSON_UNESCAPED_SLASHES),
+            $resultTurn['content'][1]['content'],
+        );
+    }
+
+    public function testEmptyToolInputAndSchemaPropertiesEncodeAsJsonObjects(): void
+    {
+        $client = $this->client([$this->textMessage('ok')]);
+        $messages = [
+            ['role' => 'user', 'content' => [['type' => 'text', 'text' => 'hello']]],
+            ['role' => 'assistant', 'content' => [
+                ['type' => 'tool_use', 'id' => 'toolu_empty', 'name' => 'list_my_machines', 'input' => []],
+            ]],
+        ];
+
+        $client->complete($messages, $this->tools());
+
+        $raw = $this->rawBodyOf($this->requests[0]);
+        self::assertStringContainsString('"input":{}', $raw, 'empty tool input must be an object');
+        self::assertStringContainsString('"properties":{}', $raw, 'empty schema properties must be an object');
+        self::assertStringNotContainsString('"input":[]', $raw);
+        self::assertStringNotContainsString('"properties":[]', $raw);
+    }
+
+    public function testConsecutiveUserMessagesMergeIntoOneProviderTurn(): void
+    {
+        $client = $this->client([$this->textMessage('ok')]);
+        $messages = [
+            ['role' => 'user', 'content' => [['type' => 'text', 'text' => 'first persisted user turn']]],
+            ['role' => 'user', 'content' => [['type' => 'text', 'text' => 'retry after provider failure']]],
+        ];
+
+        $client->complete($messages, $this->tools());
+        $wire = $this->bodyOf($this->requests[0])['messages'];
+
+        self::assertCount(1, $wire);
+        self::assertSame('user', $wire[0]['role']);
+        self::assertSame([
+            ['type' => 'text', 'text' => 'first persisted user turn'],
+            ['type' => 'text', 'text' => 'retry after provider failure'],
+        ], $wire[0]['content']);
+    }
+
     public function testFailedToolResultIsMarkedAsErrorData(): void
     {
         $client = $this->client([$this->textMessage('ok')]);
@@ -106,6 +175,54 @@ final class AnthropicClientTest extends TestCase
 
         $block = array_slice($this->bodyOf($this->requests[0])['messages'], -1)[0]['content'][0];
         self::assertTrue($block['is_error'], 'refused tool results are is_error DATA for the provider');
+    }
+
+    public function testRedirectsAreDisabledAnd302IsNotFollowed(): void
+    {
+        $client = $this->client([
+            new MockResponse('moved', ['http_code' => 302]),
+            $this->textMessage('must never be reached'),
+        ]);
+
+        try {
+            $client->complete($this->messageTurn(), $this->tools());
+            self::fail('expected AgentLlmUnavailableException for a redirect response');
+        } catch (AgentLlmUnavailableException) {
+        }
+
+        self::assertCount(1, $this->requests, 'a 302 must not be followed');
+        self::assertSame(0, $this->requests[0]['options']['max_redirects'] ?? null, 'redirects are disabled on the provider request');
+    }
+
+    public function testExternalHttpBaseUrlIsRefusedWithoutARequest(): void
+    {
+        $record = [];
+        $client = $this->clientWithKey(self::TEST_KEY, new ThrowingHttpClient($record, PHP_INT_MAX), 'http://api.example.com', 'prod');
+
+        try {
+            $client->complete($this->messageTurn(), $this->tools());
+            self::fail('expected AgentLlmNotAttemptedException for an external http endpoint');
+        } catch (AgentLlmNotAttemptedException) {
+            self::assertCount(0, $record, 'an unsafe endpoint must never receive a request');
+        }
+    }
+
+    public function testLoopbackHttpBaseUrlIsAllowedOutsideTestEnvironment(): void
+    {
+        $client = $this->clientWithKey(self::TEST_KEY, $this->recordingClient([$this->textMessage('local')]), 'http://127.0.0.1:8080', 'prod');
+
+        $client->complete($this->messageTurn(), $this->tools());
+
+        self::assertSame('http://127.0.0.1:8080/v1/messages', $this->requests[0]['url']);
+    }
+
+    public function testHttpBaseUrlIsAllowedInTheTestEnvironment(): void
+    {
+        $client = $this->clientWithKey(self::TEST_KEY, $this->recordingClient([$this->textMessage('test env')]), 'http://api.example.com', 'test');
+
+        $client->complete($this->messageTurn(), $this->tools());
+
+        self::assertSame('http://api.example.com/v1/messages', $this->requests[0]['url']);
     }
 
     // ------------------------------------------------------------ parsing
@@ -288,6 +405,21 @@ final class AnthropicClientTest extends TestCase
     /**
      * @param list<MockResponse> $responses
      */
+    private function recordingClient(array $responses): HttpClientInterface
+    {
+        $next = 0;
+        $requests = &$this->requests;
+
+        return new MockHttpClient(function (string $method, string $url, array $options) use ($responses, &$next, &$requests): MockResponse {
+            $requests[] = ['method' => $method, 'url' => $url, 'options' => $options];
+
+            return $responses[$next++] ?? new MockResponse('{}');
+        });
+    }
+
+    /**
+     * @param list<MockResponse> $responses
+     */
     private function client(array $responses, string $key = self::TEST_KEY): AnthropicClient
     {
         $next = 0;
@@ -301,7 +433,7 @@ final class AnthropicClientTest extends TestCase
         return $this->clientWithKey($key, $httpClient);
     }
 
-    private function clientWithKey(string $key, HttpClientInterface $httpClient): AnthropicClient
+    private function clientWithKey(string $key, HttpClientInterface $httpClient, string $baseUrl = AgentConfig::DEFAULT_BASE_URL, string $environment = 'prod'): AnthropicClient
     {
         return new AnthropicClient(
             new AgentConfig(
@@ -313,10 +445,12 @@ final class AnthropicClientTest extends TestCase
                 rateLimitIntervalSec: 300,
                 dailyTokenCap: 200000,
                 msgMaxChars: 4000,
+                baseUrl: $baseUrl,
             ),
             $httpClient,
             $key,
             new NullLogger(),
+            $environment,
         );
     }
 
@@ -406,12 +540,22 @@ final class AnthropicClientTest extends TestCase
      */
     private function bodyOf(array $request): array
     {
-        $body = $request['options']['body'] ?? '';
-        self::assertIsString($body);
+        $body = $this->rawBodyOf($request);
         $decoded = json_decode($body, true);
         self::assertIsArray($decoded);
 
         return $decoded;
+    }
+
+    /**
+     * @param array{options: array<string, mixed>} $request
+     */
+    private function rawBodyOf(array $request): string
+    {
+        $body = $request['options']['body'] ?? '';
+        self::assertIsString($body);
+
+        return $body;
     }
 }
 
@@ -447,7 +591,7 @@ final class ThrowingHttpClient implements HttpClientInterface
         return new MockResponse('{}');
     }
 
-    public function stream($responses, float $timeout = null): ResponseStreamInterface
+    public function stream($responses, ?float $timeout = null): ResponseStreamInterface
     {
         throw new \LogicException('not used');
     }

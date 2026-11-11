@@ -1,0 +1,51 @@
+# PREPARED, NEVER RUN. Keep secrets and host-only state out of the build context.
+#
+# Every environment file is excluded; only the placeholder templates
+# (.env.example, .env.prod.example, .env.test) may ever enter an image, and the
+# runtime reads real values from .env.prod / process environment instead.
+.env
+.env.*
+!.env.example
+!.env.prod.example
+!.env.test
+
+# JWT key material and any certificate/key on the host.
+config/jwt
+*.pem
+*.key
+*.crt
+
+# Broker credentials are created on the host and mounted read-only.
+docker/mosquitto/passwd
+deploy/mosquitto/passwd
+deploy/certs
+
+# Local state and tooling output.
+var/
+vendor/
+public/assets/
+assets/vendor/
+node_modules/
+.phpunit.cache/
+.php-cs-fixer.cache/
+*.log
+
+# VCS and editor noise.
+.git
+.gitignore
+.idea
+.vscode
+*.swp
+
+# Test-only configuration (tests never run inside the production image).
+phpunit.dist.xml
+tests/
+
+# Container/orchestration files are read by compose, not shipped in the image.
+compose.yaml
+compose.mqtt.yaml
+compose.prod.yaml
+
+# Documentation and archived working notes.
+README.md
+docker/initdb/

@@ -7,6 +7,7 @@ namespace App\Command;
 use App\Api\Exception\MqttUnavailableException;
 use App\Service\IoT\MqttConfig;
 use App\Service\IoT\MqttMessageHandler;
+use App\Service\IoT\MqttReconnectBackoff;
 use App\Service\IoT\MqttSubscriberInterface;
 use App\Service\IoT\MqttTopicBuilder;
 use Symfony\Component\Console\Attribute\AsCommand;
@@ -40,8 +41,6 @@ use Symfony\Component\Console\Style\SymfonyStyle;
 )]
 final class MqttConsumeCommand extends Command
 {
-    private const MAX_BACKOFF_SECONDS = 30;
-
     private const LOOP_SLICE_SECONDS = 1.0;
 
     /** Exit at 90% of --memory-limit, while the process can still report it. */
@@ -54,6 +53,8 @@ final class MqttConsumeCommand extends Command
         private readonly MqttTopicBuilder $topics,
         private readonly MqttSubscriberInterface $subscriber,
         private readonly MqttMessageHandler $handler,
+        private readonly MqttReconnectBackoff $backoffPolicy,
+        private readonly int $maxMessagesDefault = 10000,
     ) {
         parent::__construct();
     }
@@ -62,7 +63,9 @@ final class MqttConsumeCommand extends Command
     {
         $this
             ->addOption('max-runtime', null, InputOption::VALUE_REQUIRED, 'Exit cleanly after this many seconds (0 = run until interrupted).', '3600')
-            ->addOption('memory-limit', null, InputOption::VALUE_REQUIRED, 'memory_limit for this worker, e.g. 256M. At 90% it exits non-zero so a supervisor restarts it clean.', null);
+            ->addOption('memory-limit', null, InputOption::VALUE_REQUIRED, 'memory_limit for this worker, e.g. 256M. At 90% it exits non-zero so a supervisor restarts it clean.', null)
+            ->addOption('max-messages', null, InputOption::VALUE_REQUIRED, 'Exit cleanly after processing this many messages (0 = unlimited).', (string) $this->maxMessagesDefault)
+            ->addOption('stop-file', null, InputOption::VALUE_REQUIRED, 'Portable graceful-stop flag polled between loop slices.', 'var/run/mqtt-consumer.stop');
     }
 
     protected function execute(InputInterface $input, OutputInterface $output): int
@@ -83,18 +86,26 @@ final class MqttConsumeCommand extends Command
         $memoryLimitBytes = null;
 
         if (\is_string($memoryLimitRaw) && '' !== $memoryLimitRaw) {
-            $memoryLimitBytes = $this->toBytes($memoryLimitRaw);
-            if ($memoryLimitBytes <= 0) {
-                $io->error(sprintf('Invalid --memory-limit "%s" (use a PHP size such as 256M, 1G, or -1 for unlimited).', $memoryLimitRaw));
+            if ('-1' === trim($memoryLimitRaw)) {
+                // PHP's own "no limit": nothing to apply, nothing to watch.
+                $memoryLimitRaw = null;
+            } else {
+                $memoryLimitBytes = $this->toBytes($memoryLimitRaw);
+                if ($memoryLimitBytes <= 0) {
+                    $io->error(sprintf('Invalid --memory-limit "%s" (use a PHP size such as 256M, 1G, or -1 for unlimited).', $memoryLimitRaw));
 
-                return Command::FAILURE;
+                    return Command::FAILURE;
+                }
+                // Bounding the process here would make PHP fatal before we can
+                // report anything, so the option is applied to the ini and the
+                // graceful exit happens at the 90% watermark below.
+                ini_set('memory_limit', $memoryLimitRaw);
             }
-            // Bounding the process here would make PHP fatal before we can
-            // report anything, so the option is applied to the ini and the
-            // graceful exit happens at the 90% watermark below.
-            ini_set('memory_limit', $memoryLimitRaw);
         }
 
+        $maxMessages = max(0, (int) $input->getOption('max-messages'));
+        $stopFile = (string) $input->getOption('stop-file');
+        $messageStart = (int) ($this->handler->counters()['received'] ?? 0);
         $deadline = $maxRuntime > 0 ? microtime(true) + $maxRuntime : null;
         $qos = $this->config->getQos();
         $filters = $this->topics->inboundFilters();
@@ -103,7 +114,7 @@ final class MqttConsumeCommand extends Command
             $this->handler->handle($topic, $payload);
         };
 
-        $this->installSignalHandlers();
+        $this->installSignalHandlers($stopFile);
 
         $io->section('MQTT consumer');
         $io->listing($filters);
@@ -118,9 +129,13 @@ final class MqttConsumeCommand extends Command
 
         $connected = false;
         $everConnected = false;
-        $backoff = 1;
+        $backoffAttempt = 0;
 
-        while (!$this->stopRequested && (null === $deadline || microtime(true) < $deadline)) {
+        while (!$this->stopRequested
+            && !is_file($stopFile)
+            && (null === $deadline || microtime(true) < $deadline)
+            && (0 === $maxMessages || (($this->handler->counters()['received'] ?? 0) - $messageStart) < $maxMessages)
+        ) {
             if (null !== $memoryLimitBytes && memory_get_usage(true) >= (int) ($memoryLimitBytes * self::MEMORY_HIGH_WATERMARK)) {
                 $io->error(sprintf(
                     'Memory high watermark reached (%s of %s) — exiting non-zero so a supervisor restarts a clean worker.',
@@ -137,7 +152,7 @@ final class MqttConsumeCommand extends Command
                     $this->subscriber->subscribe($filters, $qos, $onMessage);
                     $connected = true;
                     $everConnected = true;
-                    $backoff = 1;
+                    $backoffAttempt = 0;
                     $io->success('Connected and subscribed.');
                 }
 
@@ -151,25 +166,30 @@ final class MqttConsumeCommand extends Command
                 $connected = false;
                 $this->subscriber->close();
 
-                $wait = $backoff;
+                $wait = $this->backoffPolicy->delaySeconds($backoffAttempt++);
                 if (null !== $deadline) {
-                    $wait = (int) min((float) $backoff, max(0.0, $deadline - microtime(true)));
+                    $wait = min($wait, max(0.0, $deadline - microtime(true)));
                 }
 
-                $io->warning(sprintf('Broker unavailable: %s — retrying in %ds.', $exception->getMessage(), $wait));
-                if ($wait > 0) {
-                    sleep($wait);
+                $io->warning(sprintf('Broker unavailable (mqtt_unavailable) — retrying after %.3fs.', $wait));
+                $remainingWait = $wait;
+                while ($remainingWait > 0 && !is_file($stopFile)) {
+                    $sleepSlice = min(0.25, $remainingWait);
+                    usleep((int) ($sleepSlice * 1_000_000));
+                    $remainingWait -= $sleepSlice;
                 }
-
-                $backoff = min($backoff * 2, self::MAX_BACKOFF_SECONDS);
             } catch (\Throwable $exception) {
-                $io->error(sprintf('Fatal error in the MQTT consumer: %s (%s)', $exception->getMessage(), $exception::class));
+                $io->error(sprintf('Fatal error in the MQTT consumer (%s).', $exception::class));
                 $this->subscriber->close();
 
                 return Command::FAILURE;
             }
         }
 
+        if (is_file($stopFile)) {
+            @unlink($stopFile);
+            $this->stopRequested = true;
+        }
         $this->subscriber->close();
 
         $counters = $this->handler->counters();
@@ -184,9 +204,7 @@ final class MqttConsumeCommand extends Command
 
         if (!$everConnected) {
             $io->error(sprintf(
-                'Never reached the broker at %s:%d during this run — exiting non-zero so a supervisor retries.',
-                $this->config->getHost(),
-                $this->config->getPort(),
+                'Never reached the broker during this run — exiting non-zero so a supervisor retries.',
             ));
 
             return Command::FAILURE;
@@ -194,7 +212,9 @@ final class MqttConsumeCommand extends Command
 
         $io->success($this->stopRequested
             ? 'Interrupted — consumer stopped cleanly.'
-            : sprintf('Max runtime of %ds reached — consumer stopped cleanly.', $maxRuntime));
+            : (0 !== $maxMessages && (($this->handler->counters()['received'] ?? 0) - $messageStart) >= $maxMessages
+                ? sprintf('Message limit of %d reached — consumer stopped cleanly.', $maxMessages)
+                : sprintf('Max runtime of %ds reached — consumer stopped cleanly.', $maxRuntime)));
 
         return Command::SUCCESS;
     }
@@ -204,7 +224,7 @@ final class MqttConsumeCommand extends Command
      * It does not on Windows, so --max-runtime (not a signal) is what bounds
      * the worker there.
      */
-    private function installSignalHandlers(): void
+    private function installSignalHandlers(string $stopFile): void
     {
         if (!\function_exists('pcntl_async_signals') || !\function_exists('pcntl_signal') || !\defined('SIGINT')) {
             return;
@@ -212,8 +232,8 @@ final class MqttConsumeCommand extends Command
 
         pcntl_async_signals(true);
 
-        $handler = function (): void {
-            $this->stopRequested = true;
+        $handler = function () use ($stopFile): void {
+            @file_put_contents($stopFile, 'stop');
             $this->subscriber->interrupt();
         };
 
@@ -223,11 +243,11 @@ final class MqttConsumeCommand extends Command
         }
     }
 
-    /** Parse a PHP-style size ("256M", "1G", "-1") into bytes (0 = unlimited). */
+    /** Parse a PHP-style size ("256M", "1G") into bytes; 0 means unusable. */
     private function toBytes(string $value): int
     {
         $value = trim($value);
-        if ('' === $value || '-1' === $value) {
+        if ('' === $value) {
             return 0;
         }
 

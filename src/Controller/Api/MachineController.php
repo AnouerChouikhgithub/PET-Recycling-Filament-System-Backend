@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Controller\Api;
 
 use App\Api\ApiResponse;
+use App\Api\Exception\ValidationException;
 use App\Dto\Transformer\MachineViewFactory;
 use App\Service\Machine\MachineQueryService;
 use Symfony\Component\HttpFoundation\JsonResponse;
@@ -14,8 +15,8 @@ use Symfony\Component\Routing\Attribute\Route;
 /**
  * Machine read API (phase 1 foundation).
  *
- * POST /api/machines/{id}/commands is deliberately NOT implemented — IoT
- * command execution arrives in phase 2 (MQTT). See README.
+ * Command dispatch lives in IotController (POST /api/machines/{id}/commands)
+ * so the read and write surfaces stay separate. See README.
  */
 final class MachineController
 {
@@ -113,10 +114,7 @@ final class MachineController
         $machine = $this->queryService->getMachine($id);
         [$limit, $offset] = Pagination::fromRequest($request);
 
-        $sinceParam = $request->query->get('since');
-        $since = \is_string($sinceParam) && '' !== $sinceParam
-            ? new \DateTimeImmutable($sinceParam)
-            : null;
+        $since = $this->parseSince($request);
 
         $rows = $this->queryService->telemetryHistoryRows($machine, $limit, $offset, $since);
 
@@ -124,6 +122,35 @@ final class MachineController
             array_map($this->views->telemetryRow(...), $rows),
             meta: ['limit' => $limit, 'offset' => $offset, 'count' => \count($rows)],
         );
+    }
+
+    /** Parse the optional ISO-8601 `since` filter; malformed input is a 422, never a 500. */
+    private function parseSince(Request $request): ?\DateTimeImmutable
+    {
+        $sinceParam = $request->query->get('since');
+        if (!\is_string($sinceParam) || '' === $sinceParam) {
+            return null;
+        }
+
+        // DateTimeImmutable accepts relative phrases such as "yesterday" and
+        // normalizes impossible dates. The public API contract is ISO-8601 only.
+        $parsed = date_parse($sinceParam);
+        if (!preg_match('/^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:[.][0-9]+)?(?:Z|[+-][0-9]{2}:[0-9]{2})$/i', $sinceParam)
+            || $parsed['error_count'] > 0
+            || $parsed['warning_count'] > 0
+        ) {
+            throw new ValidationException('The provided data is invalid.', [
+                'since' => ['Must be a valid ISO-8601 date/time.'],
+            ]);
+        }
+
+        try {
+            return new \DateTimeImmutable($sinceParam);
+        } catch (\Exception) {
+            throw new ValidationException('The provided data is invalid.', [
+                'since' => ['Must be a valid ISO-8601 date/time.'],
+            ]);
+        }
     }
 
     /**

@@ -7,6 +7,7 @@ namespace App\Service\Agent;
 use App\Api\Exception\AgentLlmNotAttemptedException;
 use App\Api\Exception\AgentLlmUnavailableException;
 use Psr\Log\LoggerInterface;
+use Symfony\Contracts\HttpClient\Exception\RedirectionExceptionInterface;
 use Symfony\Contracts\HttpClient\Exception\TransportExceptionInterface;
 use Symfony\Contracts\HttpClient\HttpClientInterface;
 use Symfony\Contracts\HttpClient\ResponseInterface;
@@ -30,7 +31,7 @@ use Symfony\Contracts\HttpClient\ResponseInterface;
  * Orchestration message shape (internal, NOT wire): roles system, user,
  * assistant, tool_result - wireMessages() converts it. Tool RESULTS always
  * travel JSON-encoded inside a tool_result block, never spliced into user or
- * assistant text (docs/ai-agent-risks.md R1); anything the model needs from a
+ * assistant text (injection barrier); anything the model needs from a
  * tool goes back as DATA on the next model turn only.
  *
  * Failure handling: ONE immediate retry, only for transport failures and
@@ -57,6 +58,8 @@ final class AnthropicClient implements LlmClientInterface
         /** Injected from the environment in services.yaml; never logged, never returned. */
         private readonly string $apiKey,
         private readonly LoggerInterface $agentLogger,
+        /** Kernel environment: http endpoints are tolerated in tests only. */
+        private readonly string $environment = 'prod',
     ) {
     }
 
@@ -68,6 +71,8 @@ final class AnthropicClient implements LlmClientInterface
             // reservation instead of billing a floor for work that never ran.
             throw new AgentLlmNotAttemptedException('The assistant service is not configured.');
         }
+
+        $this->assertEndpointAllowed();
 
         try {
             $response = $this->request($messages, $tools);
@@ -108,8 +113,15 @@ final class AnthropicClient implements LlmClientInterface
                 'body' => $this->body($messages, $tools),
                 'timeout' => $this->config->requestTimeoutSec,
                 'max_duration' => $totalSeconds,
+                // Never turn a provider redirect into an authenticated request
+                // to another host: a 3xx is a failure, not something to follow.
+                'max_redirects' => 0,
             ]);
             $status = $response->getStatusCode();
+        } catch (RedirectionExceptionInterface) {
+            $this->logFailure('redirect', null, 1);
+
+            throw new AgentLlmUnavailableException();
         } catch (TransportExceptionInterface) {
             // connect failure, DNS, timeout, aborted stream -> retryable
             throw new ProviderRetryableException(null);
@@ -139,7 +151,7 @@ final class AnthropicClient implements LlmClientInterface
     {
         try {
             $raw = $response->getContent();
-        } catch (TransportExceptionInterface) {
+        } catch (RedirectionExceptionInterface|TransportExceptionInterface) {
             // Headers came back OK but the body died: likely billed server-side.
             // Deliberately NOT retried - a second call risks double billing.
             $this->logFailure('body', null, 1);
@@ -218,7 +230,9 @@ final class AnthropicClient implements LlmClientInterface
             $payload['system'] = $system;
         }
         if ([] !== $tools) {
-            $payload['tools'] = $tools;
+            // An empty JSON Schema `properties` object must encode as `{}`,
+            // not `[]`; Anthropic rejects the array form for object schemas.
+            $payload['tools'] = array_map($this->wireTool(...), $tools);
         }
 
         return (string) json_encode($payload, JSON_UNESCAPED_SLASHES);
@@ -271,45 +285,95 @@ final class AnthropicClient implements LlmClientInterface
             }
 
             if ('tool_result' === $role) {
-                $wireBlock = $this->wireToolResult($content);
+                $wireBlocks = $this->wireToolResults($content);
+                if ([] === $wireBlocks) {
+                    continue;
+                }
+
                 $last = \count($wire) - 1;
                 if ([] !== $wire && 'user' === $wire[$last]['role']) {
-                    $wire[$last]['content'][] = $wireBlock;
+                    array_push($wire[$last]['content'], ...$wireBlocks);
                 } else {
-                    $wire[] = ['role' => 'user', 'content' => [$wireBlock]];
+                    $wire[] = ['role' => 'user', 'content' => $wireBlocks];
                 }
 
                 continue;
             }
 
-            $wire[] = [
-                'role' => 'user' === $role ? 'user' : 'assistant',
-                'content' => $this->wireBlocks($content),
-            ];
+            $wireRole = 'user' === $role ? 'user' : 'assistant';
+            $wireBlocks = $this->wireBlocks($content);
+            $last = \count($wire) - 1;
+            if ([] !== $wire && $wire[$last]['role'] === $wireRole) {
+                array_push($wire[$last]['content'], ...$wireBlocks);
+            } else {
+                $wire[] = [
+                    'role' => $wireRole,
+                    'content' => $wireBlocks,
+                ];
+            }
         }
 
         return $wire;
     }
 
     /**
+     * Converts EVERY internal tool-result block into a provider tool_result.
+     * A multi-tool response must send one result per tool_use id in call
+     * order; dropping all but the first breaks the next model turn.
+     *
      * @param mixed $content the internal tool_result-role message content
+     *
+     * @return list<array<string, mixed>>
+     */
+    private function wireToolResults(mixed $content): array
+    {
+        if (!\is_array($content)) {
+            return [];
+        }
+
+        $blocks = [];
+        foreach ($content as $block) {
+            if (!\is_array($block)) {
+                continue;
+            }
+
+            $toolUseId = (string) ($block['tool_use_id'] ?? '');
+            if ('' === $toolUseId) {
+                // A result without its id cannot be matched to a tool_use;
+                // never send an invalid provider block.
+                continue;
+            }
+
+            $result = \is_array($block['content'] ?? null) ? $block['content'] : [];
+
+            // The payload is JSON-ENCODED string data inside the block: it
+            // stays data for the provider, is never executed, and keeps any
+            // embedded quotes/newlines from being interpreted as structure.
+            $blocks[] = [
+                'type' => 'tool_result',
+                'tool_use_id' => $toolUseId,
+                'content' => (string) json_encode($result, JSON_UNESCAPED_SLASHES),
+                'is_error' => !(bool) ($result['ok'] ?? false),
+            ];
+        }
+
+        return $blocks;
+    }
+
+    /**
+     * @param array<string, mixed> $tool
      *
      * @return array<string, mixed>
      */
-    private function wireToolResult(mixed $content): array
+    private function wireTool(array $tool): array
     {
-        $block = \is_array($content) ? ($content[0] ?? null) : null;
-        $result = \is_array($block) && \is_array($block['content'] ?? null) ? $block['content'] : [];
+        $schema = \is_array($tool['input_schema'] ?? null) ? $tool['input_schema'] : [];
+        if (\array_key_exists('properties', $schema) && \is_array($schema['properties']) && [] === $schema['properties']) {
+            $schema['properties'] = (object) [];
+        }
+        $tool['input_schema'] = $schema;
 
-        // The payload is JSON-ENCODED string data inside the block: it stays
-        // data for the provider, is never executed, and keeps any embedded
-        // quotes/newlines from being interpreted as structure.
-        return [
-            'type' => 'tool_result',
-            'tool_use_id' => (string) (\is_array($block) ? ($block['tool_use_id'] ?? '') : ''),
-            'content' => (string) json_encode($result, JSON_UNESCAPED_SLASHES),
-            'is_error' => !(bool) ($result['ok'] ?? false),
-        ];
+        return $tool;
     }
 
     /**
@@ -323,10 +387,47 @@ final class AnthropicClient implements LlmClientInterface
             return [['type' => 'text', 'text' => $content]];
         }
         if (\is_array($content)) {
-            return $content;
+            $blocks = [];
+            foreach ($content as $block) {
+                if (!\is_array($block)) {
+                    continue;
+                }
+                // A no-argument tool call must serialize its input as `{}`,
+                // not `[]`; PHP would otherwise encode an empty array.
+                if ('tool_use' === ($block['type'] ?? null)
+                    && \array_key_exists('input', $block)
+                    && \is_array($block['input'])
+                    && [] === $block['input']
+                ) {
+                    $block['input'] = (object) [];
+                }
+                $blocks[] = $block;
+            }
+
+            return [] === $blocks ? [['type' => 'text', 'text' => '']] : $blocks;
         }
 
         return [['type' => 'text', 'text' => '']];
+    }
+
+    /**
+     * The API key must never be sent to a plain-http external host. Loopback
+     * (local proxy/tests) and the test environment are the only exceptions.
+     */
+    private function assertEndpointAllowed(): void
+    {
+        $base = '' !== $this->config->baseUrl ? $this->config->baseUrl : AgentConfig::DEFAULT_BASE_URL;
+        $parts = parse_url($base);
+        $scheme = is_array($parts) ? strtolower((string) ($parts['scheme'] ?? '')) : '';
+        $host = is_array($parts) ? strtolower((string) ($parts['host'] ?? '')) : '';
+        $loopback = in_array($host, ['localhost', '127.0.0.1', '::1', '[::1]'], true)
+            || str_ends_with($host, '.localhost');
+
+        if ('https' !== $scheme && 'test' !== $this->environment && !$loopback) {
+            $this->logFailure('insecure-endpoint', null, 1);
+
+            throw new AgentLlmNotAttemptedException('The assistant endpoint is not allowed.');
+        }
     }
 
     private function endpointUrl(): string
@@ -339,7 +440,7 @@ final class AnthropicClient implements LlmClientInterface
     private function logFailure(string $phase, ?int $status, int $attempt, ?string $providerErrorType = null): void
     {
         // METADATA ONLY: phase, status, attempt, bounded error type. Never the
-        // request/response body, never the key (docs/ai-agent-risks.md R5/R6).
+        // request/response body, never the key (no content or key material).
         $this->agentLogger->warning('agent.llm.failure', [
             'phase' => $phase,
             'status' => $status,
@@ -363,18 +464,5 @@ final class AnthropicClient implements LlmClientInterface
         }
 
         return mb_substr($type, 0, self::MAX_META_CHARS);
-    }
-}
-
-/**
- * Internal carrier for conditions the policy allows ONE immediate retry for:
- * transport failures (no provider status) and provider 5xx responses.
- */
-final class ProviderRetryableException extends \RuntimeException
-{
-    public function __construct(
-        public readonly ?int $status,
-    ) {
-        parent::__construct('provider call retryable');
     }
 }

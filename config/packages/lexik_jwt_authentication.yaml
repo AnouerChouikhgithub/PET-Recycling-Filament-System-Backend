@@ -3,3 +3,12 @@ lexik_jwt_authentication:
     public_key: '%env(resolve:JWT_PUBLIC_KEY)%'
     pass_phrase: '%env(JWT_PASSPHRASE)%'
     token_ttl: 3600   # 1 h access token; renewal goes through POST /api/auth/token/refresh
+
+# Tests NEVER use the real key pair. These paths are git-ignored
+# (config/jwt/test/*.pem) and the passphrase in .env.test is intentionally
+# public: it protects throwaway test keys only.
+when@test:
+    lexik_jwt_authentication:
+        secret_key: '%kernel.project_dir%/config/jwt/test/private.pem'
+        public_key: '%kernel.project_dir%/config/jwt/test/public.pem'
+        pass_phrase: '%env(JWT_PASSPHRASE)%'

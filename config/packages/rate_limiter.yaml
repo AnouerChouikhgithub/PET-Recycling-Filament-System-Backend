@@ -2,6 +2,9 @@
 #
 #   - login:    5 attempts / 5 min / IP   → too many = HTTP 429 (x6)
 #   - register: 3 accounts  / 10 min / IP → stops mass account creation
+#   - refresh:  30 requests / 5 min / IP → bounds the public rotation
+#               endpoint; a normal client refreshes once per access-token
+#               lifetime (1 h), so this only stops bursts/abuse
 #
 # Policy switches (env): AUTH_REGISTER_ENABLED=false closes open registration
 # entirely; REMOVE the limiters here if a real deployment sits behind an
@@ -16,3 +19,11 @@ framework:
             policy: 'sliding_window'
             limit: 3
             interval: '10 minutes'
+        auth_refresh:
+            policy: 'sliding_window'
+            limit: 30
+            interval: '5 minutes'
+        health:
+            policy: 'sliding_window'
+            limit: 120
+            interval: '1 minute'

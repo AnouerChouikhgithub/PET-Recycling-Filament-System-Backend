@@ -5,13 +5,14 @@ declare(strict_types=1);
 namespace App\Service\Agent;
 
 /**
- * EXACT-MATCH fault-code explanation table (docs/ai-agent-risks.md R1: the
+ * EXACT-MATCH fault-code explanation table (the exact match is the injection barrier: the
  * exact match is the injection barrier - any code not listed here returns
  * known:false and the model must not invent a meaning).
  *
- * DECIDED (session 1): start minimal - only the five device-reportable
- * lifecycle states plus the derived-offline wording out of
- * docs/api-contract.md. Extended only as real firmware fault codes land.
+ * DECIDED (session 1): start with the five device-reportable lifecycle
+ * states, the derived-offline wording, and the numeric device fault codes
+ * already published in the README API contract. Extend only as real firmware
+ * fault codes land.
  */
 final class FaultCodeTable
 {
@@ -45,6 +46,36 @@ final class FaultCodeTable
             'title' => 'Offline (derived)',
             'meaning' => 'No fresh report has arrived within the offline window; the last state may no longer be valid.',
             'safeUserActions' => ['Check power and the network, then wait until the machine reports again.'],
+        ],
+        '1' => [
+            'title' => 'Sensor fault',
+            'meaning' => 'A sensor fault was reported.',
+            'safeUserActions' => [],
+        ],
+        '2' => [
+            'title' => 'Hard over-temperature',
+            'meaning' => 'A hard over-temperature condition was reported.',
+            'safeUserActions' => [],
+        ],
+        '3' => [
+            'title' => 'Heater no-rise',
+            'meaning' => 'The heater failed to reach the expected temperature rise.',
+            'safeUserActions' => [],
+        ],
+        '4' => [
+            'title' => 'Thermal runaway',
+            'meaning' => 'A thermal runaway fault was reported.',
+            'safeUserActions' => [],
+        ],
+        '5' => [
+            'title' => 'Cold-extrusion interlock',
+            'meaning' => 'A cold-extrusion interlock was reported.',
+            'safeUserActions' => [],
+        ],
+        '6' => [
+            'title' => 'Watchdog',
+            'meaning' => 'A watchdog fault was reported.',
+            'safeUserActions' => [],
         ],
     ];
 
