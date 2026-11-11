@@ -8,15 +8,22 @@ set -u
 
 say() { printf '%s\n' "$*"; }
 
+# Non-zero as soon as anything actionable is found: a check that only PRINTS
+# problems is a check nobody runs twice (BUGS-TO-FIX F6 - the dev database was
+# missing the agent migration while every table looked fine otherwise).
+FAIL=0
+
 say "== Docker postgres containers =="
 if command -v docker >/dev/null 2>&1; then
   if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -i postgres >/dev/null; then
     say "WARNING: no running postgres container. Start it: docker compose up -d"
+    FAIL=1
   fi
   docker ps --format '{{.Names}} | {{.Image}} | {{.Ports}}' | grep -iE 'postgres|mailpit' || true
   COUNT=$(docker ps --format '{{.Image}}' 2>/dev/null | grep -c postgres || true)
   if [ "$COUNT" -gt 1 ]; then
     say "WARNING: $COUNT postgres containers are running — 'symfony serve' may inject a different DATABASE_URL than .env!"
+    FAIL=1
   fi
 else
   say "WARNING: docker CLI not found."
@@ -51,14 +58,29 @@ try {
 say ""
 
 say "== Migration status =="
-php bin/console doctrine:migrations:up-to-date || true
+if php bin/console doctrine:migrations:up-to-date; then
+  say "[OK] dev database is migrated to the latest version"
+else
+  say "[FAIL] the dev database is MISSING migrations — tables created there are absent,"
+  say "       so those routes answer 500 until you apply them:"
+  say "         php bin/console doctrine:migrations:migrate --no-interaction"
+  say "       (or: composer db:setup  — creates + migrates the dev AND test databases)"
+  FAIL=1
+fi
 say ""
 
 say "== doctrine:schema:validate =="
 php bin/console doctrine:schema:validate --skip-sync -q >/dev/null 2>&1; M=$?
 php bin/console doctrine:schema:validate --skip-mapping >/dev/null 2>&1; S=$?
-if [ "$M" -eq 0 ] && [ "$S" -eq 0 ]; then say "[OK] mapping + database schema are in sync"; else say "[FAIL] schema drift detected — run: php bin/check-schema --dev && php bin/console doctrine:fixtures:load"; fi
+if [ "$M" -eq 0 ] && [ "$S" -eq 0 ]; then say "[OK] mapping + database schema are in sync"; else say "[FAIL] schema drift detected — run: php bin/check-schema --dev && php bin/console doctrine:fixtures:load"; FAIL=1; fi
 say ""
 
 say "== JWT keys present? =="
-[ -f config/jwt/private.pem ] && say "[OK] config/jwt/private.pem exists (values never printed)" || say "MISSING: run php bin/console lexik:jwt:generate-keypair"
+[ -f config/jwt/private.pem ] && say "[OK] config/jwt/private.pem exists (values never printed)" || { say "MISSING: run php bin/console lexik:jwt:generate-keypair"; FAIL=1; }
+
+say ""
+if [ "$FAIL" -ne 0 ]; then
+  say "RESULT: FAIL — fix the item(s) above before trusting this environment."
+  exit 1
+fi
+say "RESULT: OK"

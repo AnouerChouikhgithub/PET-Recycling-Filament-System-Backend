@@ -234,3 +234,62 @@ onTelemetry(cb) · onMachineStatus(cb) · onMachineEvent(cb)
 
 No secrets ever live in the frontends; `.env` files are git-ignored,
 `.env.example` files are committed.
+
+## AI agent endpoints (phase 1, read-only; behind AGENT_ENABLED)
+
+All agent routes live in the `api` firewall (user JWT). When
+`AGENT_ENABLED=false` every route answers `404 AGENT_DISABLED`. The
+assistant only ever sees machines the requester OWNS (admins included).
+
+Env vars (placeholders only in tracked files; the real
+`ANTHROPIC_API_KEY` lives in untracked `.env.local` / process env):
+`AGENT_ENABLED, AGENT_MODEL, AGENT_BASE_URL(=), AGENT_CONNECT_TIMEOUT_SEC(5),
+AGENT_REQUEST_TIMEOUT_SEC(30), AGENT_MAX_TOKENS(1024),
+AGENT_MAX_TOOL_ROUNDS(4), AGENT_CONTEXT_MESSAGES(12),
+AGENT_RATE_LIMIT_MESSAGES(20), AGENT_RATE_LIMIT_INTERVAL_SEC(300),
+AGENT_DAILY_TOKEN_CAP(200000), AGENT_MSG_MAX_CHARS(4000), ANTHROPIC_API_KEY(=)`.
+
+### POST /api/agent/chat
+
+Request (application/json):
+
+    { "conversationId": "01a2...|absent", "message": "string 1..4000 chars" }
+
+Response 200:
+
+    { "success": true, "data": {
+        "conversationId": "01a146d8-977e-75d4-9d0d-1dca66a29096",
+        "message": { "id": "01a146d8-97d6-...", "role": "assistant",
+                     "content": "Your heater reached the target 12 s ago.",
+                     "toolCalls": [{"name": "get_latest_telemetry",
+                                    "summary": "get_latest_telemetry: 1 row(s)"}],
+                     "createdAt": "2026-10-16T22:41:00+00:00" } },
+      "meta": { "usage": { "inputTokens": 512, "outputTokens": 96 } } }
+
+(The doc keys above use `usage.inputTokens/outputTokens`; the wire payload
+is `meta.usage.{input,output}` exactly.)
+
+Errors (standard envelope):
+- `422 VALIDATION_FAILED` - empty/whitespace or >4000-char message
+- `404 AGENT_NOT_FOUND` - unknown, foreign, or soft-deleted conversationId
+- `429 AGENT_RATE_LIMITED` (Retry-After) - 20 messages / 5 min per USER
+- `429 AGENT_DAILY_TOKEN_CAP` (Retry-After) - per-user per-UTC-day cap
+  enforced by an atomic reserve before the LLM call; failed turns bill a
+  conservative 1000-token floor so accounting cannot be bypassed
+- `503 AGENT_LLM_UNAVAILABLE` - provider failure/config/timeout; provider
+  details stay server-side (metadata-only agent log channel)
+
+### DELETE /api/agent/conversations/{id}
+
+Owner-scoped soft delete. `200 {"success":true,"data":{"deleted":true,...}}`;
+unknown/foreign id `404 AGENT_NOT_FOUND`. A soft-deleted conversation can
+no longer be resumed (it behaves as unknown).
+
+### DELETE /api/agent/conversations
+
+Soft-deletes ALL of the user's conversations.
+`200 {"success":true,"data":{"deleted":true,"count":N}}`.
+
+The agent never dispatches machine commands: it has no write tools (the
+registry is locked to five read-only tools by test), and the command path
+`POST /api/machines/{id}/commands` remains unchanged.

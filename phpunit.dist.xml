@@ -20,6 +20,8 @@
              overrides these to the strict production values per test. -->
         <env name="RATE_LIMIT_LOGIN" value="1000" force="true" />
         <env name="RATE_LIMIT_REGISTER" value="1000" force="true" />
+        <!-- Agent: .env.test pins relaxed defaults; the strict limits are
+             asserted per-test below (mirrors the auth rate-limit pattern). -->
         <!-- MQTT: the default suite must never open a socket, so the transport
              is forced off and every parameter gets a non-secret default. The
              opt-in integration test reads MQTT_TEST_HOST instead. -->
