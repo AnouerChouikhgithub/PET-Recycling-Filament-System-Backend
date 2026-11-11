@@ -230,12 +230,14 @@ final class AgentOrchestrator
 
             $llmMessages[] = MessagesContentNormalizer::toolResults($resultBlocks);
             if ($toolRoundLimitReached) {
-                $answer = $textOut;
+                // The cap means the turn did NOT finish. Any text in the
+                // capped response is partial filler, never a final answer.
+                $answer = $this->fallbackFor($message);
                 break;
             }
         }
 
-        if ('' === $answer) {
+        if ('' === trim($answer)) {
             $answer = $this->fallbackFor($message);
         }
 

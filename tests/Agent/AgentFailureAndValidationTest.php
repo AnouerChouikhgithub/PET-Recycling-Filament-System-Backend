@@ -122,6 +122,40 @@ final class AgentFailureAndValidationTest extends AgentApiTestCase
         self::assertSame($fallback, $persisted);
     }
 
+    public function testRoundCapIgnoresFillerTextAndUsesFallback(): void
+    {
+        $owner = $this->createUser('round-cap-text', 'round-cap-pass-123');
+        $machine = $this->createMachine('Round cap text', 'rct-'.substr($this->suffix, 0, 8), $owner['user']);
+        $this->login((string) $owner['email'], (string) $owner['password']);
+
+        for ($i = 1; $i <= 4; ++$i) {
+            $this->stub()->addResponse([['type' => 'tool_use', 'id' => 'cap-t-'.$i, 'name' => 'get_recent_events', 'input' => ['machineId' => $machine->getId()->toRfc4122()]]]);
+        }
+        // The capped response also carries filler text: it must NOT become
+        // the final answer for a turn that never completed.
+        $this->stub()->addResponse([
+            ['type' => 'text', 'text' => 'Here is a partial summary.'],
+            ['type' => 'tool_use', 'id' => 'cap-t-5', 'name' => 'get_recent_events', 'input' => ['machineId' => $machine->getId()->toRfc4122()]],
+        ]);
+
+        $this->client->request('POST', '/api/agent/chat', [], [], ['CONTENT_TYPE' => 'application/json'], (string) json_encode(['message' => 'keep checking events']));
+
+        self::assertResponseStatusCodeSame(200);
+        self::assertSame("I couldn't complete that lookup. Please try again.", $this->json()['data']['message']['content']);
+    }
+
+    public function testWhitespaceOnlyAnswerUsesFallback(): void
+    {
+        $owner = $this->createUser('white-answer', 'white-answer-pass');
+        $this->login((string) $owner['email'], (string) $owner['password']);
+        $this->stub()->addResponse([['type' => 'text', 'text' => "  \n\t "]]);
+
+        $this->client->request('POST', '/api/agent/chat', [], [], ['CONTENT_TYPE' => 'application/json'], (string) json_encode(['message' => 'hello']));
+
+        self::assertResponseStatusCodeSame(200);
+        self::assertSame("I couldn't complete that lookup. Please try again.", $this->json()['data']['message']['content']);
+    }
+
     public function testFrenchPromptGetsFrenchFallbackAtRoundCap(): void
     {
         $owner = $this->createUser('round-cap-fr', 'round-cap-pass-123');
