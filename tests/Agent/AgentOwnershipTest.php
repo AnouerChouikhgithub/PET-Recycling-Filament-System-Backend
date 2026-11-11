@@ -15,7 +15,7 @@ use Symfony\Component\Security\Core\Authentication\Token\Storage\TokenStorageInt
 use Symfony\Component\Security\Core\Authentication\Token\UsernamePasswordToken;
 
 /**
- * Ownership isolation of the agent surface (docs/ai-agent-test-plan.md T1).
+ * Ownership isolation of the agent surface (owner-only isolation).
  * Note the DECIDED rule: admins get NO agent-wide view (T1.6).
  */
 final class AgentOwnershipTest extends AgentApiTestCase

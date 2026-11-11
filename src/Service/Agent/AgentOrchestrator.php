@@ -45,7 +45,7 @@ use Psr\Log\LoggerInterface;
  *   - every failure still bills whatever COMPLETED calls really reported.
  *
  * Logging: agent channel, METADATA ONLY (ids, tool names, counts) - never
- * message content or tool payloads (docs/ai-agent-test-plan.md T7.3).
+ * message content or tool payloads.
  */
 final class AgentOrchestrator
 {

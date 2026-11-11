@@ -50,8 +50,7 @@ final class AgentConfig
      *   output side: (maxToolRounds + 1) calls x max_tokens each
      *
      * The estimate never depends on the actual content of the turn, so it
-     * can be taken before anything is persisted (docs/ai-agent-test-plan.md
-     * T3.2: nothing is saved on a cap-rejected turn).
+     * can be taken before anything is persisted (nothing is saved on a cap-rejected turn).
      */
     public function reserveEstimateTokens(): int
     {

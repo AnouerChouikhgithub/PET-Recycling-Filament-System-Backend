@@ -30,7 +30,7 @@ use Symfony\Contracts\HttpClient\ResponseInterface;
  * Orchestration message shape (internal, NOT wire): roles system, user,
  * assistant, tool_result - wireMessages() converts it. Tool RESULTS always
  * travel JSON-encoded inside a tool_result block, never spliced into user or
- * assistant text (docs/ai-agent-risks.md R1); anything the model needs from a
+ * assistant text (injection barrier); anything the model needs from a
  * tool goes back as DATA on the next model turn only.
  *
  * Failure handling: ONE immediate retry, only for transport failures and
@@ -408,7 +408,7 @@ final class AnthropicClient implements LlmClientInterface
     private function logFailure(string $phase, ?int $status, int $attempt, ?string $providerErrorType = null): void
     {
         // METADATA ONLY: phase, status, attempt, bounded error type. Never the
-        // request/response body, never the key (docs/ai-agent-risks.md R5/R6).
+        // request/response body, never the key (no content or key material).
         $this->agentLogger->warning('agent.llm.failure', [
             'phase' => $phase,
             'status' => $status,

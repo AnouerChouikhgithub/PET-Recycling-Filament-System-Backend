@@ -9,7 +9,7 @@ use Psr\Log\LoggerInterface;
 /**
  * Default RealtimeBroadcaster: logs every realtime event. Swap to a WebSocket
  * or SSE hub by rebinding the `App\Service\Realtime\RealtimeBroadcaster`
- * alias — see docs/api-contract.md ("Realtime layer").
+ * alias — see README: realtime is Future and logs only.
  */
 final class LoggingRealtimeBroadcaster implements RealtimeBroadcaster
 {

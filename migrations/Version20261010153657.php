@@ -8,7 +8,7 @@ use Doctrine\DBAL\Schema\Schema;
 use Doctrine\Migrations\AbstractMigration;
 
 /**
- * AI agent phase 1 (docs/ai-agent-roadmap.md step B1):
+ * AI agent phase 1 schema:
  *   agent_conversation (owner-scoped, soft delete)
  *   agent_message      (per-conversation turns, metadata-only tool_calls)
  *   agent_token_usage  (daily per-user token cap accounting)

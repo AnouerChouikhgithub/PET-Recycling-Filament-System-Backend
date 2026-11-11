@@ -14,7 +14,7 @@ use Symfony\Component\Uid\Uuid;
 /**
  * Recent events for ONE owned machine. There is no DB store for the MQTT
  * inbound "events" branch yet, so events = this machine's COMMAND AUDIT
- * history (docs/ai-agent-design.md section 4.3). Ownership in code, same as
+ * history. Ownership in code, same as
  * the other tools.
  */
 final class GetRecentEventsTool implements AgentTool

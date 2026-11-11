@@ -8,7 +8,7 @@ namespace App\Service\Agent;
  * A single LLM tool: name, JSON schema for the model, and a server-side
  * executor. Tools NEVER trust user-controlled identity - they resolve
  * machines through the existing MachineAccess service - and NEVER dispatch
- * machine commands (phase 1 is read-only; docs/ai-agent-test-plan.md T4.*).
+ * machine commands (read-only: no command tool exists).
  */
 interface AgentTool
 {

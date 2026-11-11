@@ -14,7 +14,7 @@ use Symfony\Component\Uid\Uuid;
  * (MachineQueryService -> MachineAccess::getOwnedMachine): a machine the
  * user does not own behaves exactly like an unknown id (MACHINE_NOT_FOUND).
  *
- * Honesty contract (docs/ai-agent-test-plan.md T5):
+ * Honesty contract:
  *   - unreported channels arrive as the literal string "Not reported";
  *   - recordedAt + dataAgeSeconds always present;
  *   - staleness label: >120 s "stale", >600 s "very stale, telemetry missing".

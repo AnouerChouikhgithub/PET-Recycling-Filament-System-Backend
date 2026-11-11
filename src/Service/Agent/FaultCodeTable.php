@@ -5,13 +5,13 @@ declare(strict_types=1);
 namespace App\Service\Agent;
 
 /**
- * EXACT-MATCH fault-code explanation table (docs/ai-agent-risks.md R1: the
+ * EXACT-MATCH fault-code explanation table (the exact match is the injection barrier: the
  * exact match is the injection barrier - any code not listed here returns
  * known:false and the model must not invent a meaning).
  *
  * DECIDED (session 1): start with the five device-reportable lifecycle
  * states, the derived-offline wording, and the numeric device fault codes
- * already published in docs/api-contract.md. Extend only as real firmware
+ * already published in the README API contract. Extend only as real firmware
  * fault codes land.
  */
 final class FaultCodeTable

@@ -147,9 +147,9 @@ final class OwnershipAndAuditTest extends WebTestCase
 
     public function testMachineCommandTypePublicValuesMatchContract(): void
     {
-        // The public API contract is docs/api-contract.md — this test fails
-        // if anyone adds/removes/renames a command value silently.
-        $contract = file_get_contents(dirname(__DIR__, 2).'/docs/api-contract.md');
+        // The public API contract is the README — this test fails if anyone
+        // adds/removes/renames a command value silently.
+        $contract = file_get_contents(dirname(__DIR__, 2).'/README.md');
         self::assertIsString($contract);
         // Normalize line endings first: with core.autocrlf=true the working
         // copy of this document is CRLF on Windows while the committed blob
@@ -158,14 +158,14 @@ final class OwnershipAndAuditTest extends WebTestCase
 
         // The whole list must sit on ONE "Commands:" line, every value backticked.
         preg_match('/^Commands:((?:\s+`[^`]+`)+)\.?$/m', $contract, $line);
-        self::assertArrayHasKey(1, $line, 'docs/api-contract.md must list the command values on one line');
+        self::assertArrayHasKey(1, $line, 'README.md must list the command values on one line');
 
         preg_match_all('/`([^`]+)`/', $line[1], $m);
         $documented = $m[1];
         self::assertSame(
             \App\Entity\MachineCommandType::values(),
             $documented,
-            'MachineCommandType public values and docs/api-contract.md must stay identical',
+            'MachineCommandType public values and README.md must stay identical',
         );
     }
 

@@ -43,7 +43,7 @@ final class MachineCommandService
 {
     public const EVENT_NAME = 'app.machine_command_dispatched';
 
-    /** Wire format of the command envelope (see docs/mqtt-contract.md). */
+    /** Wire format of the command envelope (see README: MQTT contract). */
     public const PAYLOAD_VERSION = 1;
 
     /** Audit transport recorded when the broker acknowledged the publish. */

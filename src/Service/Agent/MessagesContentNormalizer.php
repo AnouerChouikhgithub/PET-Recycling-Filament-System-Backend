@@ -11,7 +11,7 @@ namespace App\Service\Agent;
  *   ['role' => 'tool_result', 'content' => [['type' => 'tool_result', 'content' => [...]]]]
  *
  * Tool results are ALWAYS JSON-encoded INSIDE a tool_result block - never
- * interpolated into text (docs/ai-agent-risks.md R1).
+ * interpolated into text (injection barrier).
  */
 final class MessagesContentNormalizer
 {    /** @return array<string, mixed> */
