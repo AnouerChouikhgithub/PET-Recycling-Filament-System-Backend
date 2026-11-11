@@ -569,7 +569,7 @@ composer validate --no-check-publish
 php bin/console debug:router    # route table
 ```
 
-Current results (2026-11-11, round 5): **180 tests, 1 324 assertions, 2 skipped**
+Current results (2026-11-11, round 5): **181 tests, 1 327 assertions, 2 skipped**
 (the skipped tests are the real-broker MQTT integration tests). PHPStan: **no
 errors**. `lint:container`, `lint:yaml config` and `composer validate` pass.
 Round 5 added coverage for the health route (body, headers, per-IP limit), the
