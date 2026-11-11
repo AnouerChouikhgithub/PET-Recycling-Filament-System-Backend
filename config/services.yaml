@@ -59,6 +59,7 @@ parameters:
     app.mqtt.command_ttl_seconds_default: 30
     app.mqtt.max_payload_bytes_default: 4096
     app.mqtt.telemetry_max_per_second_default: 2
+    app.mqtt.consumer_max_messages_default: 10000
 
 services:
     # default configuration for services in *this* file
@@ -108,6 +109,10 @@ services:
             $fanMax: '%app.command.fan_max%'
 
     App\Security\DeviceTokenAuthenticator: ~
+
+    App\Command\MqttConsumeCommand:
+        arguments:
+            $maxMessagesDefault: '%env(default:app.mqtt.consumer_max_messages_default:int:MQTT_CONSUMER_MAX_MESSAGES)%'
 
     App\Service\IoT\MqttConfig:
         # Typed MQTT_* parameters (App\Service\IoT\MqttConfig). The five

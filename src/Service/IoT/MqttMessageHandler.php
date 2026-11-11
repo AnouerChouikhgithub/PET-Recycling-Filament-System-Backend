@@ -70,8 +70,7 @@ final class MqttMessageHandler
         } catch (\Throwable $exception) {
             $this->count('failed');
             $this->logger->error('MQTT message dropped after an unexpected failure.', [
-                'topic' => $topic,
-                'reason' => $exception->getMessage(),
+                'topic_class' => $this->topicClass($topic),
                 'class' => $exception::class,
                 // Deliberately no payload: it is untrusted input and may hold
                 // anything. Metadata only.
@@ -103,7 +102,7 @@ final class MqttMessageHandler
         $parsed = $this->topics->parse($topic);
         if (null === $parsed) {
             $this->count('dropped');
-            $this->logger->notice('MQTT message on an unknown topic dropped.', ['topic' => $topic]);
+            $this->logger->notice('MQTT message on an unknown topic dropped.', ['topic_class' => $this->topicClass($topic)]);
 
             return;
         }
@@ -133,7 +132,7 @@ final class MqttMessageHandler
             $this->count('dropped');
             $this->logger->warning('MQTT message for an unknown machine dropped (MQTT never creates machines).', [
                 'machine' => $identifier,
-                'topic' => $topic,
+                'topic_class' => $this->topicClass($topic),
             ]);
 
             return;
@@ -408,6 +407,12 @@ final class MqttMessageHandler
         $this->logger->warning($reason, $context);
     }
 
+    private function topicClass(string $topic): string
+    {
+        $parsed = $this->topics->parse($topic);
+        return null === $parsed ? 'unknown' : $parsed['branch'];
+    }
+
     private function count(string $key): void
     {
         $this->counters[$key] = ($this->counters[$key] ?? 0) + 1;
@@ -432,7 +437,7 @@ final class MqttMessageHandler
         } catch (\Throwable $exception) {
             $connection->close();
             $this->logger->error('Database unreachable; connection dropped so the next message can reconnect.', [
-                'reason' => $exception->getMessage(),
+                'reason_class' => $exception::class,
             ]);
         }
     }
