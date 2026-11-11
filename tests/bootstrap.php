@@ -7,6 +7,23 @@ require dirname(__DIR__).'/vendor/autoload.php';
 
 (new Dotenv())->bootEnv(dirname(__DIR__).'/.env');
 
+// The test environment is cryptographically isolated from development and
+// production: it signs with config/jwt/test/*.pem only. Fail with an
+// actionable message instead of an opaque container/JWT error.
+$testPrivateKey = dirname(__DIR__).'/config/jwt/test/private.pem';
+$testPublicKey = dirname(__DIR__).'/config/jwt/test/public.pem';
+if (!is_file($testPrivateKey) || !is_file($testPublicKey)) {
+    fwrite(STDERR, "[tests/bootstrap] MISSING test JWT keys under config/jwt/test/.
+");
+    fwrite(STDERR, "[tests/bootstrap] Generate them with:
+");
+    fwrite(STDERR, "  APP_ENV=test php bin/console lexik:jwt:generate-keypair --overwrite
+");
+    fwrite(STDERR, "[tests/bootstrap] The real config/jwt key pair is never used by tests.
+");
+    exit(1);
+}
+
 if ($_SERVER['APP_DEBUG']) {
     umask(0000);
 }

@@ -65,11 +65,21 @@ cp .env.example .env          # .env is git-ignored; it has never been tracked s
 composer install              # runs cache:clear, assets:install, importmap:install
 ```
 
-Generate JWT keys once (git-ignored under `config/jwt/`):
+Generate a LOCAL development key pair (git-ignored under `config/jwt/`):
 
 ```bash
 php bin/console lexik:jwt:generate-keypair
 ```
+
+Generate the separate TEST key pair once. Tests sign only with these keys;
+`tests/bootstrap.php` refuses to run if they are missing (also git-ignored):
+
+```bash
+APP_ENV=test php bin/console lexik:jwt:generate-keypair --overwrite
+```
+
+The passphrase in `.env.test` is intentionally public and only protects the
+throwaway test pair. It must never be reused for the real pair.
 
 Start PostgreSQL and apply migrations:
 
