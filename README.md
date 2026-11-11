@@ -212,7 +212,7 @@ decision.
 | GET | `/api/machines/{id}/sessions` | JWT | owner or admin | — |
 | GET | `/api/machines/{id}/production` | JWT | owner or admin | — |
 | GET | `/api/machines/{id}/recycling` | JWT | owner or admin | — |
-| POST | `/api/machines/{id}/commands` | JWT | owner or admin (policy open) | — |
+| POST | `/api/machines/{id}/commands` | JWT | **owner only** (admins may read, not command) | — |
 | POST | `/api/agent/chat` | JWT | **owner only** | 20 / 5 min per user + daily token cap |
 | DELETE | `/api/agent/conversations/{id}` | JWT | **owner only** | — |
 | DELETE | `/api/agent/conversations` | JWT | **owner only** | — |
@@ -504,6 +504,9 @@ of this repository.
 
 * Owner/device isolation is enforced by `MachineAccess`; device tokens are
   hashed at rest and honour the machine kill switch.
+* Command dispatch uses **strict ownership**: `ROLE_ADMIN` keeps REST read
+  access for support but cannot send commands to a machine it does not own
+  (standard 404 `MACHINE_NOT_FOUND`, no audit row).
 * JWT is RS256 with a 1 h TTL. Tests sign with a dedicated throwaway pair in
   `config/jwt/test/` and can never use the real keys; `tests/bootstrap.php`
   refuses to run without them. Refresh tokens are single-use and hashed; the

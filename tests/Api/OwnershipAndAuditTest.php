@@ -84,6 +84,36 @@ final class OwnershipAndAuditTest extends WebTestCase
         self::assertResponseIsSuccessful('admin override reaches other users machines');
     }
 
+    public function testAdminCannotCommandAnotherUsersMachine(): void
+    {
+        $owner = $this->createUser('cmd-owner-'.$this->suffix, 'cmd-owner-pass-123', false);
+        $machine = $this->createMachine('Not Yours', 'not-yours-'.substr($this->suffix, 0, 8), $owner['user']);
+        $machine->setStatus(MachineStatus::Idle)->markAsSeen();
+        $this->em->flush();
+
+        $admin = $this->createUser('cmd-admin-'.$this->suffix, 'cmd-admin-pass-123', true);
+        $this->login((string) $admin['email'], (string) $admin['password']);
+
+        $this->client->request('POST', '/api/machines/'.$machine->getId()->toRfc4122().'/commands', [], [], ['CONTENT_TYPE' => 'application/json'], (string) json_encode(['command' => 'start']));
+
+        self::assertResponseStatusCodeSame(404, 'admins may read but not command foreign machines');
+        self::assertSame('MACHINE_NOT_FOUND', $this->json()['error']['code'], 'the denial uses the standard non-enumerable 404');
+        self::assertCount(0, $this->em->getRepository(MachineCommandAudit::class)->findBy(['machine' => $machine]), 'no audit row for a denied command');
+    }
+
+    public function testAdminCanCommandOwnMachine(): void
+    {
+        $admin = $this->createUser('cmd-self-'.$this->suffix, 'cmd-self-pass-123', true);
+        $machine = $this->createMachine('Admin Owned', 'admin-owned-'.substr($this->suffix, 0, 8), $admin['user']);
+        $machine->setStatus(MachineStatus::Idle)->markAsSeen();
+        $this->em->flush();
+
+        $this->login((string) $admin['email'], (string) $admin['password']);
+        $this->client->request('POST', '/api/machines/'.$machine->getId()->toRfc4122().'/commands', [], [], ['CONTENT_TYPE' => 'application/json'], (string) json_encode(['command' => 'start']));
+
+        self::assertResponseStatusCodeSame(202, 'strict ownership still allows the owner, admin or not');
+    }
+
     public function testAcceptedCommandWritesOneAuditRow(): void
     {
         $owner = $this->createUser('audit-'.$this->suffix, 'audit-pass-123', false);
