@@ -405,9 +405,6 @@ final class AnthropicClientTest extends TestCase
     /**
      * @param list<MockResponse> $responses
      */
-    /**
-     * @param list<MockResponse> $responses
-     */
     private function recordingClient(array $responses): HttpClientInterface
     {
         $next = 0;
@@ -420,6 +417,9 @@ final class AnthropicClientTest extends TestCase
         });
     }
 
+    /**
+     * @param list<MockResponse> $responses
+     */
     private function client(array $responses, string $key = self::TEST_KEY): AnthropicClient
     {
         $next = 0;
