@@ -196,6 +196,7 @@ services:
             $httpClient: '@http_client'
             $apiKey: '%env(string:ANTHROPIC_API_KEY)%'
             $agentLogger: '@monolog.logger.agent'
+            $environment: '%kernel.environment%'
 
     App\Service\Agent\ScriptedStubLlmClient:
         public: true
